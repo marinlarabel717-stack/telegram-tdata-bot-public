@@ -2496,6 +2496,11 @@ class Config:
         # API格式转换器和验证码服务器配置
         self.WEB_SERVER_PORT = int(os.getenv("WEB_SERVER_PORT", "8080"))
         self.ALLOW_PORT_SHIFT = os.getenv("ALLOW_PORT_SHIFT", "true").lower() == "true"
+        self.BOT_WORKERS = max(4, min(64, int(os.getenv("BOT_WORKERS", "16"))))
+        self.PROGRESS_UPDATE_INTERVAL = max(3.0, float(os.getenv("PROGRESS_UPDATE_INTERVAL", "6")))
+        self.PROGRESS_UPDATE_STEP = max(5, int(os.getenv("PROGRESS_UPDATE_STEP", "20")))
+        self.FAST_SPAMBOT_WAIT = max(0.1, float(os.getenv("FAST_SPAMBOT_WAIT", "0.35")))
+        self.SPAMBOT_RETRY_WAIT = max(0.2, float(os.getenv("SPAMBOT_RETRY_WAIT", "0.6")))
         
         # 一键清理功能配置
         self.ENABLE_ONE_CLICK_CLEANUP = os.getenv("ENABLE_ONE_CLICK_CLEANUP", "true").lower() == "true"
@@ -2543,15 +2548,8 @@ class Config:
         
         print(f"📁 上传目录: {self.UPLOADS_DIR}")
         print(f"📁 结果目录: {self.RESULTS_DIR}")
-        print(f"📁 清理报告目录: {self.CLEANUP_REPORTS_DIR}")
         print(f"📁 Session目录: {self.SESSIONS_DIR}")
-        print(f"📁 临时文件目录: {self.SESSIONS_BAK_DIR}")
-        print(f"📡 系统配置: USE_PROXY={'true' if self.USE_PROXY else 'false'}")
-        print(f"🧹 一键清理: {'启用' if self.ENABLE_ONE_CLICK_CLEANUP else '禁用'}")
-        print(f"📦 批量创建: {'启用' if self.ENABLE_BATCH_CREATE else '禁用'}，每日限制: {self.BATCH_CREATE_DAILY_LIMIT}")
-        print(f"⏱️ 创建间隔: {self.BATCH_CREATE_MIN_INTERVAL}-{self.BATCH_CREATE_MAX_INTERVAL}秒（避免频率限制）")
-        print(f"🔄 重新授权: {'启用' if self.ENABLE_REAUTHORIZE else '禁用'}，并发数: {self.REAUTH_CONCURRENT}，随机设备: {'开启' if self.REAUTH_USE_RANDOM_DEVICE else '关闭'}，强制代理: {'开启' if self.REAUTH_FORCE_PROXY else '关闭'}")
-        print(f"💡 注意: 实际代理模式需要配置文件+数据库开关+有效代理文件同时满足")
+        print(f"📡 代理: {'开' if self.USE_PROXY else '关'} | Bot workers: {self.BOT_WORKERS}")
     
     def validate(self):
         if not self.TOKEN or not self.API_ID or not self.API_HASH:
@@ -2985,11 +2983,7 @@ class SpamBotChecker:
             proxy_used = "本地连接"
         
         try:
-            # 快速预检测模式（仅首次尝试）
-            if config.PROXY_FAST_MODE and attempt == 0:
-                quick_result = await self._quick_connection_test(session_path)
-                if not quick_result:
-                    return "连接错误", "快速连接测试失败", account_name
+            # 这里不再重复做二次快速预检测，避免每个账号多走一轮连接探测
             
             # 创建代理字典（如果提供了proxy_info）
             proxy_dict = None
@@ -3106,14 +3100,14 @@ class SpamBotChecker:
             try:
                 await asyncio.wait_for(
                     client.send_message('SpamBot', '/start'), 
-                    timeout=15
+                    timeout=10
                 )
-                await asyncio.sleep(2)  # 等待响应
+                await asyncio.sleep(config.FAST_SPAMBOT_WAIT if config.PROXY_FAST_MODE else config.SPAMBOT_WAIT_TIME)
                 
                 # 获取最新消息（带超时）
                 messages = await asyncio.wait_for(
-                    client.get_messages('SpamBot', limit=5), 
-                    timeout=15
+                    client.get_messages('SpamBot', limit=3), 
+                    timeout=10
                 )
                 
                 if messages:
@@ -3131,17 +3125,17 @@ class SpamBotChecker:
                         # 如果是介绍页面，重试发送 /start
                         if status == 'intro':
                             print(f"🔄 [{account_name}] 检测到介绍页面，重试发送/start...")
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(config.SPAMBOT_RETRY_WAIT)
                             await asyncio.wait_for(
                                 client.send_message('SpamBot', '/start'), 
-                                timeout=15
+                                timeout=10
                             )
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(config.FAST_SPAMBOT_WAIT if config.PROXY_FAST_MODE else config.SPAMBOT_WAIT_TIME)
                             
                             # 重新获取消息
                             retry_messages = await asyncio.wait_for(
-                                client.get_messages('SpamBot', limit=3), 
-                                timeout=15
+                                client.get_messages('SpamBot', limit=2), 
+                                timeout=10
                             )
                             
                             # 再次查找SpamBot的回复
@@ -3207,17 +3201,17 @@ class SpamBotChecker:
                         print(f"✅ [{account_name}] 已自动解除对SpamBot的屏蔽")
                         
                         # 等待一下，然后重新尝试发送消息
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(config.SPAMBOT_RETRY_WAIT)
                         await asyncio.wait_for(
                             client.send_message('SpamBot', '/start'), 
-                            timeout=15
+                            timeout=10
                         )
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(config.FAST_SPAMBOT_WAIT if config.PROXY_FAST_MODE else config.SPAMBOT_WAIT_TIME)
                         
                         # 重新获取消息
                         messages = await asyncio.wait_for(
-                            client.get_messages('SpamBot', limit=5), 
-                            timeout=15
+                            client.get_messages('SpamBot', limit=3), 
+                            timeout=10
                         )
                         
                         if messages:
@@ -3622,11 +3616,9 @@ class SpamBotChecker:
                     return "冻结", f"手机号:{phone} | {proxy_used} | 账号冻结", tdata_name
             
             # 6. SpamBot检测（带超时）
-            # 定义快速模式等待时间为常量
-            SPAMBOT_FAST_WAIT = 0.1
             try:
                 await asyncio.wait_for(client.send_message('SpamBot', '/start'), timeout=5)
-                await asyncio.sleep(config.SPAMBOT_WAIT_TIME if not config.PROXY_FAST_MODE else SPAMBOT_FAST_WAIT)
+                await asyncio.sleep(config.FAST_SPAMBOT_WAIT if config.PROXY_FAST_MODE else config.SPAMBOT_WAIT_TIME)
                 
                 entity = await client.get_entity(178220800)  # SpamBot固定ID
                 messages_found = False
@@ -3647,9 +3639,9 @@ class SpamBotChecker:
                         # 如果是介绍页面，重试
                         if status == 'intro':
                             print(f"🔄 [TData:{tdata_name}] 检测到介绍页面，重试发送/start...")
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(config.SPAMBOT_RETRY_WAIT)
                             await asyncio.wait_for(client.send_message('SpamBot', '/start'), timeout=5)
-                            await asyncio.sleep(config.SPAMBOT_WAIT_TIME if not config.PROXY_FAST_MODE else SPAMBOT_FAST_WAIT)
+                            await asyncio.sleep(config.FAST_SPAMBOT_WAIT if config.PROXY_FAST_MODE else config.SPAMBOT_WAIT_TIME)
                             
                             # 重新获取消息
                             async for retry_message in client.iter_messages(entity, limit=3):
@@ -3700,9 +3692,9 @@ class SpamBotChecker:
                         print(f"✅ [TData:{tdata_name}] 已自动解除对SpamBot的屏蔽")
                         
                         # 等待一下，然后重新尝试
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(config.SPAMBOT_RETRY_WAIT)
                         await asyncio.wait_for(client.send_message('SpamBot', '/start'), timeout=5)
-                        await asyncio.sleep(config.SPAMBOT_WAIT_TIME if not config.PROXY_FAST_MODE else 0.1)
+                        await asyncio.sleep(config.FAST_SPAMBOT_WAIT if config.PROXY_FAST_MODE else config.SPAMBOT_WAIT_TIME)
                         
                         entity = await client.get_entity(178220800)  # SpamBot固定ID
                         async for message in client.iter_messages(entity, limit=5):
@@ -5168,9 +5160,9 @@ class FileProcessor:
                 print(f"✅ 检测完成 [{processed}/{total}] ({progress_pct}%): {file_name} -> {status_display}")
                 print(f"{'='*60}\n")
                 
-                # 控制更新频率，每3秒或每10个账号更新一次
+                # 控制更新频率，避免频繁编辑消息拖慢机器人响应
                 current_time = time.time()
-                if (current_time - last_update_time >= 3) or (processed % 10 == 0) or (processed == total):
+                if (current_time - last_update_time >= config.PROGRESS_UPDATE_INTERVAL) or (processed % config.PROGRESS_UPDATE_STEP == 0) or (processed == total):
                     if update_callback:
                         elapsed = time.time() - start_time
                         speed = processed / elapsed if elapsed > 0 else 0
@@ -5240,7 +5232,7 @@ class FileProcessor:
 
             processed += 1
             current_time = time.time()
-            if update_callback and ((current_time - last_update_time >= 3) or (processed % 10 == 0) or (processed == total)):
+            if update_callback and ((current_time - last_update_time >= config.PROGRESS_UPDATE_INTERVAL) or (processed % config.PROGRESS_UPDATE_STEP == 0) or (processed == total)):
                 elapsed = current_time - start_time
                 speed = processed / elapsed if elapsed > 0 else 0
                 await update_callback(processed, total, results, speed, elapsed)
@@ -5302,7 +5294,7 @@ class FileProcessor:
             # 无论转换成功还是失败，都更新进度回调，让用户看到实时进展
             convert_done += 1
             current_time = time.time()
-            if update_callback and ((current_time - last_update_time >= 3) or (convert_done % 10 == 0) or (convert_done == total)):
+            if update_callback and ((current_time - last_update_time >= config.PROGRESS_UPDATE_INTERVAL) or (convert_done % config.PROGRESS_UPDATE_STEP == 0) or (convert_done == total)):
                 elapsed = current_time - start_time
                 speed = convert_done / elapsed if elapsed > 0 else 0
                 await update_callback(convert_done, total, results, speed, elapsed)
@@ -11166,7 +11158,7 @@ class EnhancedBot:
         else:
             self.batch_creator = None
 
-        self.updater = Updater(config.TOKEN, use_context=True)
+        self.updater = Updater(config.TOKEN, use_context=True, workers=config.BOT_WORKERS)
         self.dp = self.updater.dispatcher
         
         self.setup_handlers()
@@ -11877,37 +11869,24 @@ class EnhancedBot:
         user_id = update.effective_user.id
         
         help_text = """
-📖 <b>使用帮助</b>
+📖 <b>帮助</b>
 
-<b>🚀 主要功能</b>
-• 代理连接模式自动检测账号状态
-• 实时进度显示和自动文件发送
-• 支持Session和TData格式
-• Tdata与Session格式互转
-
-<b>📁 支持格式</b>
-• Session文件 (.session)
-• Session+JSON文件 (.session + .json)
-• TData文件夹
-• ZIP压缩包
-
-<b>🔄 格式转换</b>
-• Tdata → Session: 转换为Session格式
-• Session → Tdata: 转换为Tdata格式
-• 批量并发处理，提高效率
-
-<b>📡 代理功能</b>
-• 自动读取proxy.txt文件
-• 支持HTTP/SOCKS4/SOCKS5代理
-• 代理失败自动切换到本地连接
-
-<b>📋 使用流程</b>
-1. 准备proxy.txt文件（可选）
-2. 点击"🚀 开始检测"或"🔄 格式转换"
-3. 上传ZIP文件
-4. 观看实时进度
-5. 自动接收分类文件
+• 支持 Session / TData ZIP
+• 可做检测、转换、分类
+• 上传后自动处理并回传结果
         """
+        
+        if self.db.is_admin(user_id):
+            help_text += f"""
+
+<b>管理员</b>
+• /addadmin
+• /removeadmin
+• /listadmins
+• /proxy
+• /testproxy
+• /cleanproxy
+            """
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🔙 {t(user_id, 'btn_back_to_menu')}", callback_data="back_to_main")]
@@ -11915,37 +11894,9 @@ class EnhancedBot:
         
         if update.callback_query:
             update.callback_query.answer()
-            update.callback_query.edit_message_text(
-                text=help_text,
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
+            self.safe_edit_message(update.callback_query, help_text, 'HTML', keyboard)
         else:
-            update.message.reply_text(
-                text=help_text,
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
-        if self.db.is_admin(user_id):
-            help_text += f"""
-
-<b>👑 管理员命令</b>
-• /addadmin [ID/用户名] - 添加管理员
-• /removeadmin [ID] - 移除管理员
-• /listadmins - 查看管理员列表
-• /proxy - 代理状态管理
-• /testproxy - 测试代理连接性能
-• /cleanproxy - 清理失效代理（自动优化）
-• /convert - 格式转换功能
-
-<b>⚡ 速度优化功能</b>
-• 快速模式: {config.PROXY_FAST_MODE}
-• 并发检测: {config.PROXY_CHECK_CONCURRENT} 个
-• 智能重试: {config.PROXY_RETRY_COUNT} 次
-• 自动清理: {config.PROXY_AUTO_CLEANUP}
-            """
-        
-        self.safe_send_message(update, help_text, 'HTML')
+            self.safe_send_message(update, help_text, 'HTML', keyboard)
     
     def add_admin_command(self, update: Update, context: CallbackContext):
         """添加管理员命令"""
@@ -12191,7 +12142,7 @@ class EnhancedBot:
         def process_test():
             asyncio.run(self.process_proxy_test(update, context))
         
-        thread = threading.Thread(target=process_test)
+        thread = threading.Thread(target=process_test, daemon=True)
         thread.start()
         
         self.safe_send_message(
@@ -13007,7 +12958,7 @@ class EnhancedBot:
             query.answer()
             def process_test():
                 asyncio.run(self.process_proxy_test(update, context))
-            thread = threading.Thread(target=process_test)
+            thread = threading.Thread(target=process_test, daemon=True)
             thread.start()
             self.safe_edit_message(query, "🧪 开始测试代理（仅测试不清理）...")
         elif data == "admin_users":
@@ -14478,7 +14429,7 @@ class EnhancedBot:
                     print(f"[process_file] 处理异常: {e}")
                     import traceback
                     traceback.print_exc()
-            thread = threading.Thread(target=process_file)
+            thread = threading.Thread(target=process_file, daemon=True)
             thread.start()
 
         elif user_status in ["waiting_convert_tdata", "waiting_convert_session"]:
@@ -14492,7 +14443,7 @@ class EnhancedBot:
                     print(f"[process_conversion] 处理异常: {e}")
                     import traceback
                     traceback.print_exc()
-            thread = threading.Thread(target=process_conversion)
+            thread = threading.Thread(target=process_conversion, daemon=True)
             thread.start()
 
         elif user_status == "waiting_2fa_file":
@@ -14506,7 +14457,7 @@ class EnhancedBot:
                     print(f"[process_2fa] 处理异常: {e}")
                     import traceback
                     traceback.print_exc()
-            thread = threading.Thread(target=process_2fa)
+            thread = threading.Thread(target=process_2fa, daemon=True)
             thread.start()
 
         elif user_status == "waiting_api_file":
@@ -14520,7 +14471,7 @@ class EnhancedBot:
                     print(f"[process_api_conversion] 处理异常: {e}")
                     import traceback
                     traceback.print_exc()
-            thread = threading.Thread(target=process_api_conversion)
+            thread = threading.Thread(target=process_api_conversion, daemon=True)
             thread.start()
         elif user_status == "waiting_classify_file":
             # 账号分类处理
@@ -15051,11 +15002,7 @@ class EnhancedBot:
             if not files:
                 try:
                     progress_msg.edit_text(
-                        "❌ <b>未找到有效的账号文件</b>\n\n"
-                        "请确保ZIP文件包含:\n"
-                        "• Session 文件 (.session)\n"
-                        "• Session+JSON 文件 (.session + .json)\n"
-                        "• TData 文件夹",
+                        "❌ <b>没识别到可检查账号</b>\n\n请上传包含 Session 或 TData 的 ZIP。",
                         parse_mode='HTML'
                     )
                 except:
@@ -15069,11 +15016,7 @@ class EnhancedBot:
             # 开始检测提示
             try:
                 progress_msg.edit_text(
-                    f"{t(user_id, 'account_check_starting').format(count=total_accounts)}\n\n"
-                    f"{t(user_id, 'account_check_file_type').format(type=file_type.upper())}\n"
-                    f"{proxy_mode_text}\n"
-                    f"{t(user_id, 'account_check_threads').format(count=config.MAX_CONCURRENT_CHECKS)}\n\n"
-                    f"{t(user_id, 'account_check_please_wait')}",
+                    f"开始检测 {total_accounts} 个账号\n类型：{file_type.upper()}\n模式：{proxy_mode_text}",
                     parse_mode='HTML'
                 )
             except:
@@ -15089,30 +15032,17 @@ class EnhancedBot:
                     proxy_stats_text = ""
                     if config.USE_PROXY and self.checker.proxy_manager.is_proxy_mode_active(self.db):
                         stats = self.checker.get_proxy_usage_stats()
-                        proxy_stats_text = f"""
-{t(user_id, 'account_check_proxy_stats')}
-{t(user_id, 'account_check_proxies_used').format(count=stats['proxy_success'])}
-{t(user_id, 'account_check_fallback_local').format(count=stats['local_fallback'])}
-{t(user_id, 'account_check_failed_proxies').format(count=stats['proxy_failed'])}
-"""
+                        proxy_stats_text = f"\n代理成功：{stats['proxy_success']} | 回退本地：{stats['local_fallback']} | 代理失败：{stats['proxy_failed']}"
                     
                     mode_text = t(user_id, 'account_check_proxy_mode') if config.USE_PROXY else t(user_id, 'account_check_local_mode')
-                    fast_mode_status = t(user_id, 'account_check_fast_mode_on') if config.PROXY_FAST_MODE else t(user_id, 'account_check_fast_mode_off')
                     
-                    text = f"""
-{t(user_id, 'account_check_in_progress')}
+                    text = f"""检测中
 
-{t(user_id, 'account_check_progress_title')}
-{t(user_id, 'account_check_progress_percent').format(percent=progress, done=processed, total=total)}
-{t(user_id, 'account_check_format').format(format=file_type.upper())}
-{t(user_id, 'account_check_mode').format(mode=mode_text)}
-{t(user_id, 'account_check_speed').format(speed=f'{speed:.1f}')}
-{t(user_id, 'account_check_remaining').format(time=f'{remaining_time/60:.1f}')}
-{proxy_stats_text}
-{t(user_id, 'account_check_optimization')}
-{t(user_id, 'account_check_fast_mode').format(status=fast_mode_status)}
-{t(user_id, 'account_check_concurrency').format(count=config.PROXY_CHECK_CONCURRENT if config.PROXY_FAST_MODE else config.MAX_CONCURRENT_CHECKS)}
-{t(user_id, 'account_check_timeout').format(seconds=config.PROXY_CHECK_TIMEOUT if config.PROXY_FAST_MODE else config.CHECK_TIMEOUT)}
+进度：{processed}/{total} ({progress}%)
+类型：{file_type.upper()}
+模式：{mode_text}
+速度：{speed:.1f}/秒
+剩余：{remaining_time/60:.1f} 分钟{proxy_stats_text}
                     """
                     
                     # 创建状态|数量分离按钮
@@ -15176,21 +15106,19 @@ class EnhancedBot:
             accounts_per_sec = t(user_id, 'accounts_per_second')
             
             final_text = f"""
-✅ <b>{t(user_id, 'all_files_sent')}</b>
+✅ <b>检测完成</b>
 
-<b>{t(user_id, 'send_summary')}</b>
-• {t(user_id, 'total_accounts')}: {total_accounts}{accounts_unit}
-• 🟢 {t(user_id, 'status_no_restriction')}: {len(results['无限制'])}{accounts_unit}
-• 🟡 {t(user_id, 'status_spambot')}: {len(results['垃圾邮件'])}{accounts_unit}
-• 🔴 {t(user_id, 'status_frozen')}: {len(results['冻结'])}{accounts_unit}
-• 🟠 {t(user_id, 'status_banned')}: {len(results['封禁'])}{accounts_unit}
-• ⚫ {t(user_id, 'status_connection_error')}: {len(results['连接错误'])}{accounts_unit}{proxy_stats}
+总数：{total_accounts}{accounts_unit}
+🟢 正常：{len(results['无限制'])}{accounts_unit}
+🟡 垃圾邮件：{len(results['垃圾邮件'])}{accounts_unit}
+🔴 冻结：{len(results['冻结'])}{accounts_unit}
+🟠 封禁：{len(results['封禁'])}{accounts_unit}
+⚫ 失败：{len(results['连接错误'])}{accounts_unit}{proxy_stats}
 
-<b>{t(user_id, 'performance_stats')}</b>
-• {check_time_text}
-• {t(user_id, 'average_speed')}: {final_speed:.1f} {accounts_per_sec}
+耗时：{int(total_time)}{seconds_unit}
+均速：{final_speed:.1f} {accounts_per_sec}
 
-{t(user_id, 'sending_files')}
+正在发送结果文件…
             """
             
             # 最终状态按钮
@@ -15256,14 +15184,11 @@ class EnhancedBot:
                 check_mode = t(user_id, 'check_mode_proxy') if actual_proxy_mode else t(user_id, 'check_mode_local')
                 
                 summary_text = f"""
-🎉 <b>{t(user_id, 'all_files_sent')}</b>
+✅ <b>结果已发送</b>
 
-{t(user_id, 'send_summary')}
-{t(user_id, 'files_sent_count').format(count=sent_count)}
-{t(user_id, 'check_mode_summary').format(mode=check_mode)}
-{t(user_id, 'check_duration').format(seconds=int(total_time))}
-
-{t(user_id, 'thanks_message')}
+文件数：{sent_count}
+模式：{check_mode}
+耗时：{int(total_time)} 秒
                 """
                 
                 try:
@@ -16106,7 +16031,7 @@ class EnhancedBot:
                 def process_password_change():
                     asyncio.run(self.complete_2fa_change_with_passwords(update, context, old_password, new_password))
                 
-                thread = threading.Thread(target=process_password_change)
+                thread = threading.Thread(target=process_password_change, daemon=True)
                 thread.start()
                 
             elif len(parts) == 2:
@@ -16120,7 +16045,7 @@ class EnhancedBot:
                 def process_password_change():
                     asyncio.run(self.complete_2fa_change_with_passwords(update, context, old_password, new_password))
                 
-                thread = threading.Thread(target=process_password_change)
+                thread = threading.Thread(target=process_password_change, daemon=True)
                 thread.start()
                 
             else:
@@ -29124,17 +29049,8 @@ o5eth</code>
         print(f"✅ 报告生成完成！成功发送 {sent_count}/{len(zip_files)} 个ZIP文件", flush=True)
     
     def run(self):
-        print("🚀 启动增强版机器人（速度优化版）...")
-        print(f"📡 代理模式: {'启用' if config.USE_PROXY else '禁用'}")
-        print(f"🔢 可用代理: {len(self.proxy_manager.proxies)}个")
-        print(f"⚡ 快速模式: {'开启' if config.PROXY_FAST_MODE else '关闭'}")
-        print(f"🚀 并发数: {config.PROXY_CHECK_CONCURRENT if config.PROXY_FAST_MODE else config.MAX_CONCURRENT_CHECKS}个")
-        print(f"⏱️ 检测超时: {config.PROXY_CHECK_TIMEOUT if config.PROXY_FAST_MODE else config.CHECK_TIMEOUT}秒")
-        print(f"🔄 智能重试: {config.PROXY_RETRY_COUNT}次")
-        print(f"🧹 自动清理: {'启用' if config.PROXY_AUTO_CLEANUP else '禁用'}")
-        print("✅ 管理员系统: 启用")
-        print("✅ 速度优化: 预计提升3-5倍")
-        print("🛑 按 Ctrl+C 停止机器人")
+        print("🚀 机器人启动中...")
+        print(f"📡 代理: {'开' if config.USE_PROXY else '关'} | 并发: {config.PROXY_CHECK_CONCURRENT if config.PROXY_FAST_MODE else config.MAX_CONCURRENT_CHECKS} | workers: {config.BOT_WORKERS}")
         print("-" * 50)
         
         try:
