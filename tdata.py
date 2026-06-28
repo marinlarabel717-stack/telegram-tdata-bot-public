@@ -11407,19 +11407,15 @@ class EnhancedBot:
             count: Number of accounts
             
         Returns:
-            Tuple of (filename, caption_text, check_time_display, check_mode)
+            Tuple of (filename, caption_text)
         """
         zip_name_key = self.get_zip_name_translation_key(status)
         file_desc_key = self.get_file_desc_translation_key(status)
         
         zip_filename = f"{t(user_id, zip_name_key).format(count=count)}.zip"
         file_caption_text = t(user_id, file_desc_key).format(count=count)
-        
-        actual_proxy_mode = self.proxy_manager.is_proxy_mode_active(self.db)
-        check_mode = t(user_id, 'check_mode_proxy') if actual_proxy_mode else t(user_id, 'check_mode_local')
-        check_time_display = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S CST')
-        
-        return zip_filename, file_caption_text, check_time_display, check_mode
+
+        return zip_filename, file_caption_text
     
     def setup_handlers(self):
         self.dp.add_handler(CommandHandler("start", self.start_command))
@@ -15276,11 +15272,7 @@ class EnhancedBot:
                     unit = t(user_id, 'accounts_unit')
                     proxy_stats = f"\n\n{t(user_id, 'proxy_connection')}: {proxy_used_count}{unit}\n{t(user_id, 'local_connection')}: {local_used_count}{unit}"
             
-            # 格式化检测时间
             seconds_unit = t(user_id, 'seconds_unit')
-            minutes_unit = t(user_id, 'minutes_unit')
-            check_time_text = t(user_id, 'check_time').format(time=f'{int(total_time)}{seconds_unit} ({total_time/60:.1f}{minutes_unit})')
-            
             accounts_unit = t(user_id, 'accounts_unit')
             accounts_per_sec = t(user_id, 'accounts_per_second')
             
@@ -15316,16 +15308,14 @@ class EnhancedBot:
                         print(f"📤 正在发送: {status}_{count}个.zip")
                         
                         # 获取翻译后的文件信息
-                        zip_filename, file_caption_text, check_time_display, check_mode = self.get_translated_file_info(user_id, status, count)
+                        zip_filename, file_caption_text = self.get_translated_file_info(user_id, status, count)
                         
                         with open(file_path, 'rb') as f:
                             context.bot.send_document(
                                 chat_id=update.effective_chat.id,
                                 document=f,
                                 filename=zip_filename,
-                                caption=f"{file_caption_text}\n\n"
-                                       f"{t(user_id, 'check_time').format(time=check_time_display)}\n"
-                                       f"{t(user_id, 'check_mode_label').format(mode=check_mode)}",
+                                caption=file_caption_text,
                                 parse_mode='HTML'
                             )
                         
@@ -15340,7 +15330,7 @@ class EnhancedBot:
                         await asyncio.sleep(e.retry_after + 1)
                         # 重试发送
                         try:
-                            zip_filename, file_caption_text, _, _ = self.get_translated_file_info(user_id, status, count)
+                            zip_filename, file_caption_text = self.get_translated_file_info(user_id, status, count)
                             
                             with open(file_path, 'rb') as f:
                                 context.bot.send_document(
@@ -15356,29 +15346,7 @@ class EnhancedBot:
                     except Exception as e:
                         print(f"❌ 发送文件失败: {status} - {e}")
             
-            # 发送完成总结
-            if sent_count > 0:
-                # 检查实际的代理模式状态
-                actual_proxy_mode = self.proxy_manager.is_proxy_mode_active(self.db)
-                check_mode = t(user_id, 'check_mode_proxy') if actual_proxy_mode else t(user_id, 'check_mode_local')
-                
-                summary_text = f"""
-✅ <b>结果已发送</b>
-
-文件数：{sent_count}
-模式：{check_mode}
-耗时：{int(total_time)} 秒
-                """
-                
-                try:
-                    context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=summary_text,
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-            else:
+            if sent_count <= 0:
                 try:
                     context.bot.send_message(
                         chat_id=update.effective_chat.id,
