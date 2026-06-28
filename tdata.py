@@ -3015,12 +3015,15 @@ class SpamBotChecker:
                 proxy_enabled = db.get_proxy_enabled() if db else True
                 use_proxy = config.USE_PROXY and proxy_enabled and self.proxy_manager.proxies
                 
-                # 确定重试次数：使用增强版重试配置
+                # 确定重试次数：
+                # - 代理模式：按代理轮询重试，保留现有逻辑
+                # - 本地模式：同样进行多次本地重试，而不是只检查一次
                 max_proxy_attempts = self.max_retries if use_proxy else 0
+                total_attempts = (max_proxy_attempts + 1) if use_proxy else self.max_retries
                 
                 # 尝试不同的代理
                 all_timeout = True  # 标记是否所有代理都是超时
-                for proxy_attempt in range(max_proxy_attempts + 1):
+                for proxy_attempt in range(total_attempts):
                     proxy_info = None
                     
                     # 获取代理（如果启用）
@@ -3070,7 +3073,7 @@ class SpamBotChecker:
                         return result
                     
                     # 如果到达最后一次尝试
-                    if proxy_attempt >= max_proxy_attempts:
+                    if proxy_attempt >= total_attempts - 1:
                         # 创建使用记录
                         usage_record = ProxyUsageRecord(
                             account_name=account_name,
@@ -3086,7 +3089,10 @@ class SpamBotChecker:
                     
                     # 重试间隔延迟
                     if config.PROXY_DEBUG_VERBOSE:
-                        print(f"连接失败 ({result[1][:50]}), 重试下一个代理...")
+                        if use_proxy:
+                            print(f"连接失败 ({result[1][:50]}), 重试下一个代理...")
+                        else:
+                            print(f"连接失败 ({result[1][:50]}), 本地重试第 {proxy_attempt + 2}/{total_attempts} 次...")
                     await asyncio.sleep(self.retry_delay)
                 
                 # 只有所有代理都超时时，才尝试本地连接
@@ -3110,7 +3116,8 @@ class SpamBotChecker:
                     
                     return result
                 
-                return "连接错误", f"检查失败 (重试{max_proxy_attempts}次): 多次尝试后仍然失败", account_name
+                retry_count_text = max_proxy_attempts if use_proxy else total_attempts
+                return "连接错误", f"检查失败 (重试{retry_count_text}次): 多次尝试后仍然失败", account_name
                 
             except Exception as e:
                 return "连接错误", f"检查失败: {str(e)}", proxy_used
