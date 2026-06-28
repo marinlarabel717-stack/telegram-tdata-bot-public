@@ -274,6 +274,7 @@ TEXTS = {
     'error_session_locked': 'Session file is locked',
     'error_connection_timeout': 'Connection timeout',
     'error_network_failed': 'Network connection failed',
+    'error_session_incompatible': 'Session schema is incompatible and compatibility repair failed',
     'error_conversion_failed': 'Conversion failed',
     'error_no_valid_files': 'No valid files found',
     'error_ensure_correct_format': 'Please ensure ZIP contains the correct format',

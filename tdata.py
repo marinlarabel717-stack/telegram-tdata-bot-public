@@ -1467,9 +1467,159 @@ def copy_session_to_temp(session_path: str) -> Tuple[str, str]:
     temp_session_base = temp_session_path[:-8]  # 移除 '.session' (8个字符)
     
     try:
-        # 复制主session文件
-        if os.path.exists(f"{session_base}.session"):
-            shutil.copy2(f"{session_base}.session", f"{temp_session_base}.session")
+        source_session_file = f"{session_base}.session"
+        target_session_file = f"{temp_session_base}.session"
+
+        def _table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
+            try:
+                return [row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()]
+            except Exception:
+                return []
+
+        def _rebuild_compatible_session(source_file: str, target_file: str) -> None:
+            from telethon.sessions import sqlite as telethon_sqlite
+
+            source_conn = sqlite3.connect(source_file)
+            source_conn.row_factory = sqlite3.Row
+            target_conn = sqlite3.connect(target_file)
+            target_cur = target_conn.cursor()
+
+            try:
+                target_cur.execute(
+                    """
+                    CREATE TABLE version (
+                        version INTEGER PRIMARY KEY
+                    )
+                    """
+                )
+                target_cur.execute(
+                    """
+                    CREATE TABLE sessions (
+                        dc_id INTEGER PRIMARY KEY,
+                        server_address TEXT,
+                        port INTEGER,
+                        auth_key BLOB,
+                        takeout_id INTEGER
+                    )
+                    """
+                )
+                target_cur.execute(
+                    """
+                    CREATE TABLE entities (
+                        id INTEGER PRIMARY KEY,
+                        hash INTEGER NOT NULL,
+                        username TEXT,
+                        phone INTEGER,
+                        name TEXT,
+                        date INTEGER
+                    )
+                    """
+                )
+                target_cur.execute(
+                    """
+                    CREATE TABLE sent_files (
+                        md5_digest BLOB,
+                        file_size INTEGER,
+                        type INTEGER,
+                        id INTEGER,
+                        hash INTEGER,
+                        PRIMARY KEY(md5_digest, file_size, type)
+                    )
+                    """
+                )
+                target_cur.execute(
+                    """
+                    CREATE TABLE update_state (
+                        id INTEGER PRIMARY KEY,
+                        pts INTEGER,
+                        qts INTEGER,
+                        date INTEGER,
+                        seq INTEGER
+                    )
+                    """
+                )
+                target_cur.execute(
+                    "INSERT INTO version VALUES (?)",
+                    (getattr(telethon_sqlite, "CURRENT_VERSION", 7),)
+                )
+
+                row = source_conn.execute("SELECT * FROM sessions LIMIT 1").fetchone()
+                if row:
+                    row_keys = set(row.keys())
+                    dc_id = row["dc_id"] if "dc_id" in row_keys else row[0]
+                    server_address = row["server_address"] if "server_address" in row_keys else (row[1] if len(row) > 1 else "")
+                    port = row["port"] if "port" in row_keys else (row[2] if len(row) > 2 else 0)
+                    auth_key = row["auth_key"] if "auth_key" in row_keys else (row[3] if len(row) > 3 else b"")
+                    takeout_id = row["takeout_id"] if "takeout_id" in row_keys else None
+                    target_cur.execute(
+                        "INSERT OR REPLACE INTO sessions VALUES (?,?,?,?,?)",
+                        (dc_id, server_address, port, auth_key, takeout_id)
+                    )
+
+                entities_columns = _table_columns(source_conn, "entities")
+                if entities_columns:
+                    for entity_row in source_conn.execute(
+                        "SELECT * FROM entities"
+                    ).fetchall():
+                        entity_keys = set(entity_row.keys())
+                        target_cur.execute(
+                            "INSERT OR REPLACE INTO entities VALUES (?,?,?,?,?,?)",
+                            (
+                                entity_row["id"] if "id" in entity_keys else entity_row[0],
+                                entity_row["hash"] if "hash" in entity_keys else entity_row[1],
+                                entity_row["username"] if "username" in entity_keys else None,
+                                entity_row["phone"] if "phone" in entity_keys else None,
+                                entity_row["name"] if "name" in entity_keys else None,
+                                entity_row["date"] if "date" in entity_keys else 0,
+                            )
+                        )
+
+                sent_files_columns = _table_columns(source_conn, "sent_files")
+                if sent_files_columns:
+                    for sent_file_row in source_conn.execute(
+                        "SELECT * FROM sent_files"
+                    ).fetchall():
+                        target_cur.execute(
+                            "INSERT OR REPLACE INTO sent_files VALUES (?,?,?,?,?)",
+                            (
+                                sent_file_row["md5_digest"] if "md5_digest" in sent_files_columns else sent_file_row[0],
+                                sent_file_row["file_size"] if "file_size" in sent_files_columns else sent_file_row[1],
+                                sent_file_row["type"] if "type" in sent_files_columns else sent_file_row[2],
+                                sent_file_row["id"] if "id" in sent_files_columns else sent_file_row[3],
+                                sent_file_row["hash"] if "hash" in sent_files_columns else sent_file_row[4],
+                            )
+                        )
+
+                update_state_columns = _table_columns(source_conn, "update_state")
+                if update_state_columns:
+                    for update_row in source_conn.execute(
+                        "SELECT * FROM update_state"
+                    ).fetchall():
+                        target_cur.execute(
+                            "INSERT OR REPLACE INTO update_state VALUES (?,?,?,?,?)",
+                            (
+                                update_row["id"] if "id" in update_state_columns else update_row[0],
+                                update_row["pts"] if "pts" in update_state_columns else update_row[1],
+                                update_row["qts"] if "qts" in update_state_columns else update_row[2],
+                                update_row["date"] if "date" in update_state_columns else update_row[3],
+                                update_row["seq"] if "seq" in update_state_columns else update_row[4],
+                            )
+                        )
+
+                target_conn.commit()
+            finally:
+                source_conn.close()
+                target_conn.close()
+
+        if os.path.exists(source_session_file):
+            try:
+                _rebuild_compatible_session(source_session_file, target_session_file)
+            except sqlite3.DatabaseError:
+                # 不是标准 sqlite session 时回退到原始复制逻辑
+                shutil.copy2(source_session_file, target_session_file)
+            except Exception as compat_error:
+                logger.warning(f"Session兼容重建失败，回退原始复制: {compat_error}")
+                shutil.copy2(source_session_file, target_session_file)
         
         # 复制journal文件（如果存在）
         if os.path.exists(f"{session_base}.session-journal"):
@@ -2849,10 +2999,15 @@ class SpamBotChecker:
             start_time = time.time()
             proxy_attempts = []  # Track all proxy attempts
             proxy_used = "local"
+            compat_session_path = session_path
+            compat_temp_dir = None
             
             try:
+                compat_session_base, compat_temp_dir = copy_session_to_temp(session_path)
+                compat_session_path = f"{compat_session_base}.session"
+
                 # 1. 先进行快速连接测试
-                can_connect = await self._quick_connection_test(session_path)
+                can_connect = await self._quick_connection_test(compat_session_path)
                 if not can_connect:
                     return "连接错误", "无法连接到Telegram服务器（session文件无效或不存在）", account_name
                 
@@ -2877,7 +3032,7 @@ class SpamBotChecker:
                     
                     # 尝试检测
                     result = await self._single_check_with_proxy(
-                        session_path, account_name, db, proxy_info, proxy_attempt
+                        compat_session_path, account_name, db, proxy_info, proxy_attempt
                     )
                     
                     # 记录尝试结果
@@ -2938,7 +3093,7 @@ class SpamBotChecker:
                 if use_proxy and all_timeout:
                     if config.PROXY_DEBUG_VERBOSE:
                         print(f"所有代理均超时，回退到本地连接: {account_name}")
-                    result = await self._single_check_with_proxy(session_path, account_name, db, None, max_proxy_attempts)
+                    result = await self._single_check_with_proxy(compat_session_path, account_name, db, None, max_proxy_attempts)
                     
                     # 记录本地回退
                     elapsed = time.time() - start_time
@@ -2959,6 +3114,8 @@ class SpamBotChecker:
                 
             except Exception as e:
                 return "连接错误", f"检查失败: {str(e)}", proxy_used
+            finally:
+                cleanup_temp_session(compat_temp_dir)
     
     async def _single_check_with_proxy(self, session_path: str, account_name: str, db: 'Database',
                                         proxy_info: Optional[Dict], attempt: int) -> Tuple[str, str, str]:
@@ -5500,7 +5657,8 @@ class FormatConverter:
                     dc_id INTEGER PRIMARY KEY,
                     server_address TEXT,
                     port INTEGER,
-                    auth_key BLOB
+                    auth_key BLOB,
+                    takeout_id INTEGER
                 )
             ''')
             cursor.execute('''
@@ -5509,7 +5667,8 @@ class FormatConverter:
                     hash INTEGER NOT NULL,
                     username TEXT,
                     phone INTEGER,
-                    name TEXT
+                    name TEXT,
+                    date INTEGER
                 )
             ''')
             cursor.execute('''
@@ -5536,7 +5695,7 @@ class FormatConverter:
                     version INTEGER PRIMARY KEY
                 )
             ''')
-            cursor.execute('INSERT INTO version VALUES (6)')
+            cursor.execute('INSERT INTO version VALUES (7)')
             conn.commit()
             conn.close()
             print(f"📄 创建空session文件: {os.path.basename(session_path)}")
@@ -5891,12 +6050,16 @@ class FormatConverter:
         将Session转换为Tdata
         返回: (状态, 信息, 账号名)
         """
+        client = None
+        temp_dir = None
         try:
             if not OPENTELE_AVAILABLE:
                 return "转换错误", "opentele库未安装", session_name
+
+            compat_session_base, temp_dir = copy_session_to_temp(session_path)
             
             # 创建Telethon客户端
-            client = OpenTeleClient(session_path, api_id, api_hash)
+            client = OpenTeleClient(compat_session_base, api_id, api_hash)
             
             # 连接
             await client.connect()
@@ -5936,8 +6099,17 @@ class FormatConverter:
                 return "转换错误", "<<ERROR:error_session_locked>>", session_name
             elif "auth key" in error_msg.lower():
                 return "转换错误", "<<ERROR:error_auth_key_invalid>>", session_name
+            elif "too many values to unpack" in error_msg.lower() or "not enough values to unpack" in error_msg.lower():
+                return "转换错误", "<<ERROR:error_session_incompatible>>", session_name
             else:
                 return "转换错误", f"<<ERROR:error_conversion_failed>>: {error_msg[:50]}", session_name
+        finally:
+            try:
+                if client:
+                    await client.disconnect()
+            except Exception:
+                pass
+            cleanup_temp_session(temp_dir)
     
     async def batch_convert_with_progress(self, files: List[Tuple[str, str]], conversion_type: str, 
                                          api_id: int, api_hash: str, update_callback) -> Dict[str, List[Tuple[str, str, str]]]:

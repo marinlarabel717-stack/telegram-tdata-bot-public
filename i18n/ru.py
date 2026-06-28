@@ -274,6 +274,7 @@ TEXTS = {
     'error_session_locked': 'Файл Session занят',
     'error_connection_timeout': 'Тайм-аут подключения',
     'error_network_failed': 'Сбой сетевого подключения',
+    'error_session_incompatible': 'Структура Session несовместима, и восстановление совместимости не удалось',
     'error_conversion_failed': 'Конвертация неудачна',
     'error_no_valid_files': 'Действительные файлы не найдены',
     'error_ensure_correct_format': 'Пожалуйста, убедитесь, что ZIP содержит правильный формат',

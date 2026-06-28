@@ -274,6 +274,7 @@ TEXTS = {
     'error_session_locked': 'Session文件被占用',
     'error_connection_timeout': '连接超时',
     'error_network_failed': '网络连接失败',
+    'error_session_incompatible': 'Session结构不兼容，已尝试兼容处理但仍失败',
     'error_conversion_failed': '转换失败',
     'error_no_valid_files': '未找到有效文件',
     'error_ensure_correct_format': '请确保ZIP包含正确的格式',
