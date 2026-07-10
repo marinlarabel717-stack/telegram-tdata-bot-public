@@ -3017,9 +3017,9 @@ class SpamBotChecker:
                 
                 # 确定重试次数：
                 # - 代理模式：按代理轮询重试，保留现有逻辑
-                # - 本地模式：同样进行多次本地重试，而不是只检查一次
+                # - 本地模式：保持单次检测，避免失败账号把整体速度拖慢
                 max_proxy_attempts = self.max_retries if use_proxy else 0
-                total_attempts = (max_proxy_attempts + 1) if use_proxy else self.max_retries
+                total_attempts = (max_proxy_attempts + 1) if use_proxy else 1
                 
                 # 尝试不同的代理
                 all_timeout = True  # 标记是否所有代理都是超时
@@ -3092,7 +3092,7 @@ class SpamBotChecker:
                         if use_proxy:
                             print(f"连接失败 ({result[1][:50]}), 重试下一个代理...")
                         else:
-                            print(f"连接失败 ({result[1][:50]}), 本地重试第 {proxy_attempt + 2}/{total_attempts} 次...")
+                            print(f"连接失败 ({result[1][:50]}), 本地模式不再额外重试")
                     await asyncio.sleep(self.retry_delay)
                 
                 # 只有所有代理都超时时，才尝试本地连接
@@ -3116,7 +3116,7 @@ class SpamBotChecker:
                     
                     return result
                 
-                retry_count_text = max_proxy_attempts if use_proxy else total_attempts
+                retry_count_text = max_proxy_attempts if use_proxy else 0
                 return "连接错误", f"检查失败 (重试{retry_count_text}次): 多次尝试后仍然失败", account_name
                 
             except Exception as e:
