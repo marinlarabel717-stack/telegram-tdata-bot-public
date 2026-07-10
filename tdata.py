@@ -11502,38 +11502,109 @@ class EnhancedBot:
             return True
         return False
 
-    def get_missing_required_chats(self, user_id: int) -> List[Dict[str, str]]:
+    def is_required_chat_member(self, member: Any) -> bool:
+        """判断当前成员状态是否满足强制关注/加群要求"""
+        status = str(getattr(member, "status", "") or "").lower()
+        if status in {"creator", "administrator", "member"}:
+            return True
+        if status == "restricted":
+            is_member = getattr(member, "is_member", None)
+            return True if is_member is None else bool(is_member)
+        return False
+
+    def classify_access_check_error(self, error: Exception) -> str:
+        """将成员校验异常归类，便于给用户/管理员更明确提示"""
+        text = str(error).lower()
+        if any(keyword in text for keyword in {
+            "user not found",
+            "participant_id_invalid",
+        }):
+            return "user_not_joined"
+        if any(keyword in text for keyword in {
+            "chat not found",
+            "bot is not a member",
+        }):
+            return "bot_not_in_chat"
+        if any(keyword in text for keyword in {
+            "administrator rights",
+            "admin privileges",
+            "not enough rights",
+            "have no rights",
+            "member list is inaccessible",
+            "chat_admin_required",
+            "forbidden",
+        }):
+            return "bot_no_permission"
+        return "check_failed"
+
+    def get_required_chat_check_error_text(self, error_type: str) -> str:
+        """把成员校验异常类型转换成可读提示"""
+        mapping = {
+            "user_not_joined": "当前看起来你还没加入，或者 Telegram 成员状态还没同步。",
+            "bot_not_in_chat": "机器人还不在这个目标里，暂时没法核验谁已加入。",
+            "bot_no_permission": "机器人在目标里权限不足，建议把机器人设为管理员后再检查。",
+            "check_failed": "当前目标成员状态读取失败，请稍后重试或让管理员检查目标配置。",
+        }
+        return mapping.get(error_type, mapping["check_failed"])
+
+    def get_required_chat_bot_access_label(self, chat_id: str) -> str:
+        """检查机器人自己在目标频道/群组中的状态，方便管理员排查"""
+        try:
+            bot_id = getattr(self.updater.bot, "id", None)
+            if not bot_id:
+                bot_id = self.updater.bot.get_me().id
+
+            member = self.updater.bot.get_chat_member(int(chat_id), int(bot_id))
+            status = str(getattr(member, "status", "") or "").lower()
+
+            if status in {"creator", "administrator"}:
+                return "✅ 机器人已在目标内，且具备管理员权限"
+            if self.is_required_chat_member(member):
+                return "⚠️ 机器人已在目标内，但不是管理员，成员校验可能不稳定"
+            return "⚠️ 机器人当前不在目标内"
+        except Exception as e:
+            error_type = self.classify_access_check_error(e)
+            if error_type in {"user_not_joined", "bot_not_in_chat"}:
+                return "⚠️ 机器人当前不在目标内"
+            if error_type == "bot_no_permission":
+                return "⚠️ 机器人权限不足，建议设为管理员"
+            return f"⚠️ 机器人状态校验失败：{self.get_required_chat_check_error_text(error_type)}"
+
+    def get_missing_required_chats(self, user_id: int) -> List[Dict[str, Any]]:
         """获取用户未加入的频道/群组"""
         required_chats = self.get_access_required_chats()
         if not required_chats or self.db.is_admin(user_id):
             return []
 
-        missing_chats: List[Dict[str, str]] = []
+        missing_chats: List[Dict[str, Any]] = []
         for chat_id, chat_type, title, username, invite_link in required_chats:
+            chat_info = {
+                "chat_id": str(chat_id),
+                "chat_type": chat_type,
+                "title": title,
+                "username": username or "",
+                "invite_link": invite_link or "",
+            }
             try:
                 member = self.updater.bot.get_chat_member(int(chat_id), user_id)
-                status = getattr(member, "status", "")
-                if status not in {"creator", "administrator", "member", "restricted"}:
-                    missing_chats.append({
-                        "chat_id": str(chat_id),
-                        "chat_type": chat_type,
-                        "title": title,
-                        "username": username or "",
-                        "invite_link": invite_link or "",
-                    })
+                if not self.is_required_chat_member(member):
+                    status = str(getattr(member, "status", "") or "").lower()
+                    if status:
+                        chat_info["member_status"] = status
+                    missing_chats.append(chat_info)
             except Exception as e:
                 logger.warning(f"检查用户 {user_id} 的关注状态失败 {chat_id}: {e}")
-                missing_chats.append({
-                    "chat_id": str(chat_id),
-                    "chat_type": chat_type,
-                    "title": title,
-                    "username": username or "",
-                    "invite_link": invite_link or "",
-                })
+                error_type = self.classify_access_check_error(e)
+                if error_type == "user_not_joined":
+                    chat_info["member_status"] = "left"
+                else:
+                    chat_info["check_error"] = error_type
+                    chat_info["check_error_text"] = self.get_required_chat_check_error_text(error_type)
+                missing_chats.append(chat_info)
 
         return missing_chats
 
-    def build_access_required_keyboard(self, user_id: int, missing_chats: List[Dict[str, str]]) -> InlineKeyboardMarkup:
+    def build_access_required_keyboard(self, user_id: int, missing_chats: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
         """构造强制关注提示按钮"""
         buttons = []
         for item in missing_chats:
@@ -11551,7 +11622,7 @@ class EnhancedBot:
         buttons.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_main")])
         return InlineKeyboardMarkup(buttons)
 
-    def build_access_required_text(self, missing_chats: List[Dict[str, str]]) -> str:
+    def build_access_required_text(self, missing_chats: List[Dict[str, Any]]) -> str:
         """构造强制关注提示文本"""
         lines = [
             "<b>⚠️ 使用前请先完成关注/加群</b>",
@@ -11566,6 +11637,18 @@ class EnhancedBot:
             lines.append(f"{prefix} {item.get('title', '未命名目标')}")
             if not item.get("invite_link") and not item.get("username"):
                 lines.append("   无公开链接，请联系管理员提供可加入入口。")
+            if item.get("member_status") in {"left", "kicked"}:
+                lines.append("   当前校验结果：你还没加入，或已经退出该目标。")
+            if item.get("check_error_text"):
+                lines.append(f"   当前校验结果：{item['check_error_text']}")
+
+        if any(item.get("check_error") for item in missing_chats):
+            lines.extend([
+                "",
+                "<b>提示</b>",
+                "如果你明明已经加入，但点“重新检查”还是不过，一般是机器人不在目标群/频道里，或没有管理员权限，导致无法读取你的成员状态。",
+                "这种情况需要管理员处理目标配置或机器人权限，不是你这边没加上。",
+            ])
 
         return "\n".join(lines)
 
@@ -13047,6 +13130,7 @@ class EnhancedBot:
         user_id = query.from_user.id  # ← 添加这一行
         if data == "check_access_again":
             if self.ensure_query_access(update, query, user_id):
+                query.answer("✅ 已通过检查")
                 self.show_main_menu(update, user_id)
             return
         if self.is_payment_feature_callback(data):
@@ -13862,6 +13946,7 @@ class EnhancedBot:
                 icon = "📢" if chat_type == "channel" else "👥"
                 text_lines.append(f"{index}. {icon} {title}")
                 text_lines.append(f"   ID: <code>{chat_id}</code>")
+                text_lines.append(f"   机器人校验: {self.get_required_chat_bot_access_label(chat_id)}")
                 if username:
                     text_lines.append(f"   用户名: @{username.lstrip('@')}")
                 elif invite_link:
@@ -14008,6 +14093,7 @@ class EnhancedBot:
             f"ID：<code>{chat.id}</code>\n"
             f"类型：{chat.type}\n"
         )
+        text += f"机器人状态：{self.get_required_chat_bot_access_label(str(chat.id))}\n"
         if username:
             text += f"用户名：@{username.lstrip('@')}\n"
         elif invite_link:
