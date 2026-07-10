@@ -15020,10 +15020,6 @@ class EnhancedBot:
             self.safe_send_message(update, t(user_id, 'error_upload_zip_only'))
             return
 
-        if not is_member and not self.db.is_admin(user_id):
-            self.safe_send_message(update, "❌ 需要会员权限")
-            return
-
         if document.file_size > 100 * 1024 * 1024:
             self.safe_send_message(update, "❌ 文件过大 (限制100MB)")
             return
