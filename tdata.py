@@ -11997,6 +11997,16 @@ class EnhancedBot:
             filename = 'unnamed_file'
         
         return filename
+
+    def normalize_uploaded_filename(self, filename: Optional[str], fallback: str = "uploaded_file") -> str:
+        """规范化上传文件名，保留 Emoji/括号并移除路径风险字符。"""
+        fallback_name = os.path.basename(fallback).strip() or "uploaded_file"
+        raw_name = os.path.basename((filename or "").replace('\x00', '')).strip()
+        if not raw_name:
+            return fallback_name
+
+        safe_name = self.sanitize_filename(raw_name)
+        return safe_name or fallback_name
     
     def send_document_safely(self, chat_id: int, file_path: str, caption: str = None, filename: str = None) -> bool:
         """安全发送文档，处理 RetryAfter 错误"""
@@ -15242,7 +15252,10 @@ class EnhancedBot:
         temp_zip = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_api_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
 
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, task_id)
@@ -15598,7 +15611,10 @@ class EnhancedBot:
         try:
             # 下载上传的文件到临时位置
             temp_dir = tempfile.mkdtemp(prefix="temp_download_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             
             document.get_file().download(temp_zip)
             print(f"📥 临时下载文件: {temp_zip}")
@@ -15828,7 +15844,10 @@ class EnhancedBot:
         try:
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="temp_conversion_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             
             document.get_file().download(temp_zip)
             print(f"📥 下载文件: {temp_zip}")
@@ -16064,7 +16083,10 @@ class EnhancedBot:
         try:
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="temp_2fa_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             
             document.get_file().download(temp_zip)
             print(f"📥 下载文件: {temp_zip}")
@@ -16951,7 +16973,10 @@ class EnhancedBot:
         temp_zip = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_forget2fa_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
             
             # 使用FileProcessor扫描
@@ -17176,7 +17201,10 @@ class EnhancedBot:
         temp_zip = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_add_2fa_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
             
             # 使用FileProcessor扫描
@@ -17520,7 +17548,10 @@ class EnhancedBot:
         try:
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="temp_remove_2fa_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             
             document.get_file().download(temp_zip)
             print(f"📥 下载文件: {temp_zip}")
@@ -17908,7 +17939,10 @@ class EnhancedBot:
         extract_dir = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_classify_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
             
             # 使用FileProcessor扫描
@@ -20710,7 +20744,7 @@ class EnhancedBot:
         
         # 创建临时目录
         temp_dir = tempfile.mkdtemp(prefix="temp_rename_")
-        orig_name = document.file_name
+        orig_name = self.normalize_uploaded_filename(document.file_name, "uploaded_file")
         
         # 分离文件名和扩展名
         if '.' in orig_name:
@@ -20884,7 +20918,7 @@ class EnhancedBot:
             return
         
         task = self.pending_merge[user_id]
-        filename = document.file_name
+        filename = self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
         
         # 检查文件类型 - 仅接受ZIP文件
         if not filename.lower().endswith('.zip'):
@@ -21417,7 +21451,10 @@ class EnhancedBot:
         try:
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="temp_cleanup_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
             
             # 扫描ZIP文件
@@ -22635,7 +22672,10 @@ class EnhancedBot:
             
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="batch_create_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
             
             # 扫描文件 - 使用唯一任务ID，确保只提取当前上传的账号
@@ -23747,7 +23787,10 @@ admin3</code>
             
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="reauthorize_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
             
             # 扫描文件
@@ -25449,7 +25492,10 @@ admin3</code>
             
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="registration_check_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
             
             # 扫描文件
@@ -25545,7 +25591,10 @@ admin3</code>
             
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="profile_update_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
             
             # 扫描文件
@@ -28135,7 +28184,8 @@ o5eth</code>
         try:
             # 创建临时目录
             temp_dir = tempfile.mkdtemp(prefix=f"profile_custom_{field_name}_")
-            temp_file = os.path.join(temp_dir, document.file_name)
+            safe_filename = self.normalize_uploaded_filename(document.file_name, f"{field_name}_upload")
+            temp_file = os.path.join(temp_dir, safe_filename)
             
             # 下载文件
             document.get_file().download(temp_file)
@@ -28160,7 +28210,7 @@ o5eth</code>
                 if temp_file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
                     # 单个图片文件
                     upload_dir = self._create_avatar_upload_dir(user_id)
-                    dest_path = os.path.join(upload_dir, document.file_name)
+                    dest_path = os.path.join(upload_dir, safe_filename)
                     shutil.copy(temp_file, dest_path)
                     items.append(dest_path)
                     
@@ -28969,7 +29019,10 @@ o5eth</code>
         # 下载文件
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_contact_check_")
-            temp_zip = os.path.join(temp_dir, document.file_name)
+            temp_zip = os.path.join(
+                temp_dir,
+                self.normalize_uploaded_filename(document.file_name, "uploaded.zip")
+            )
             document.get_file().download(temp_zip)
         except Exception as e:
             self.safe_edit_message_text(progress_msg, f"❌ 文件下载失败: {e}")
