@@ -4053,6 +4053,18 @@ class Database:
                 date TEXT NOT NULL
             )
         """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS required_chats (
+                chat_id TEXT PRIMARY KEY,
+                chat_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                username TEXT,
+                invite_link TEXT,
+                added_by INTEGER,
+                created_at TEXT NOT NULL
+            )
+        """)
         
         # 迁移：添加expiry_time列到memberships表
         try:
@@ -4122,43 +4134,9 @@ class Database:
             return False
     
     def check_membership(self, user_id: int) -> Tuple[bool, str, str]:
-        # 管理员优先
         if self.is_admin(user_id):
             return True, "管理员", "永久有效"
-        
-        try:
-            conn = sqlite3.connect(self.db_name)
-            c = conn.cursor()
-            c.execute("SELECT level, trial_expiry_time, expiry_time FROM memberships WHERE user_id = ?", (user_id,))
-            row = c.fetchone()
-            conn.close()
-            
-            if not row:
-                return False, "无会员", "未订阅"
-            
-            level, trial_expiry_time, expiry_time = row
-            
-            # 优先检查新的expiry_time字段
-            if expiry_time:
-                try:
-                    # Database stores naive datetime strings, parse them and compare with naive Beijing time
-                    # .replace(tzinfo=None) converts timezone-aware Beijing time to naive for comparison
-                    expiry_dt = datetime.strptime(expiry_time, "%Y-%m-%d %H:%M:%S")
-                    if expiry_dt > datetime.now(BEIJING_TZ).replace(tzinfo=None):
-                        return True, level, expiry_dt.strftime("%Y-%m-%d %H:%M:%S")
-                except:
-                    pass
-            
-            # 兼容旧的trial_expiry_time字段
-            if level == "体验会员" and trial_expiry_time:
-                # Database stores naive datetime strings, compare with naive Beijing time
-                expiry_dt = datetime.strptime(trial_expiry_time, "%Y-%m-%d %H:%M:%S")
-                if expiry_dt > datetime.now(BEIJING_TZ).replace(tzinfo=None):
-                    return True, level, expiry_dt.strftime("%Y-%m-%d %H:%M:%S")
-            
-            return False, "无会员", "已过期"
-        except:
-            return False, "无会员", "检查失败"
+        return True, "普通用户", "无需充值"
     
     def is_admin(self, user_id: int) -> bool:
         """检查用户是否为管理员"""
@@ -4347,6 +4325,71 @@ class Database:
             print(f"❌ 撤销会员失败: {e}")
             return False
     
+    def add_required_chat(
+        self,
+        chat_id: int,
+        chat_type: str,
+        title: str,
+        username: str,
+        invite_link: str,
+        added_by: int
+    ) -> bool:
+        """保存强制关注频道/群组配置"""
+        try:
+            conn = sqlite3.connect(self.db_name)
+            c = conn.cursor()
+            now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            c.execute("""
+                INSERT OR REPLACE INTO required_chats
+                (chat_id, chat_type, title, username, invite_link, added_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                str(chat_id),
+                chat_type,
+                title or str(chat_id),
+                username or "",
+                invite_link or "",
+                added_by,
+                now
+            ))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"âŒ 保存强制关注配置失败: {e}")
+            return False
+
+    def remove_required_chat(self, chat_id: str) -> bool:
+        """删除强制关注频道/群组配置"""
+        try:
+            conn = sqlite3.connect(self.db_name)
+            c = conn.cursor()
+            c.execute("DELETE FROM required_chats WHERE chat_id = ?", (str(chat_id),))
+            rows_deleted = c.rowcount
+            conn.commit()
+            conn.close()
+            return rows_deleted > 0
+        except Exception as e:
+            print(f"âŒ 删除强制关注配置失败: {e}")
+            return False
+
+    def get_required_chats(self) -> List[Tuple[str, str, str, str, str]]:
+        """获取所有强制关注频道/群组"""
+        try:
+            conn = sqlite3.connect(self.db_name)
+            c = conn.cursor()
+            c.execute("""
+                SELECT chat_id, chat_type, title, username, invite_link
+                FROM required_chats
+                ORDER BY created_at ASC
+            """)
+            rows = c.fetchall()
+            conn.close()
+            return rows
+        except Exception as e:
+            print(f"âŒ 获取强制关注配置失败: {e}")
+            return []
+
     def redeem_code(self, user_id: int, code: str) -> Tuple[bool, str, int]:
         """兑换卡密"""
         try:
@@ -11416,6 +11459,150 @@ class EnhancedBot:
         file_caption_text = t(user_id, file_desc_key).format(count=count)
 
         return zip_filename, file_caption_text
+
+    def get_access_required_chats(self) -> List[Tuple[str, str, str, str, str]]:
+        """获取管理员配置的强制关注频道/群组"""
+        return self.db.get_required_chats()
+
+    def is_payment_feature_callback(self, data: str) -> bool:
+        """判断是否为已停用的充值/会员回调"""
+        return (
+            data in {
+                "vip_menu",
+                "vip_redeem",
+                "usdt_payment",
+                "admin_payment_stats",
+                "admin_payment_orders",
+                "admin_payment_export",
+                "admin_card_menu",
+                "admin_manual_menu",
+                "admin_revoke_menu",
+            }
+            or data.startswith("usdt_plan_")
+            or data.startswith("cancel_order")
+            or data.startswith("admin_orders_page_")
+            or data.startswith("admin_export_")
+            or data.startswith("grant_membership_")
+            or data.startswith("admin_card_days_")
+            or data.startswith("admin_manual_days_")
+            or data.startswith("admin_revoke_confirm_")
+        )
+
+    def is_access_exempt_callback(self, data: str) -> bool:
+        """无需强制关注校验的回调"""
+        if data == "check_access_again":
+            return True
+        if data in {"back_to_main", "help", "status", "language_menu"}:
+            return True
+        if data.startswith("set_language_"):
+            return True
+        if data.startswith("admin_") or data.startswith("proxy_") or data.startswith("broadcast_"):
+            return True
+        if data in {"confirm_proxy_cleanup", "cancel_proxy_cleanup", "test_only_proxy"}:
+            return True
+        return False
+
+    def get_missing_required_chats(self, user_id: int) -> List[Dict[str, str]]:
+        """获取用户未加入的频道/群组"""
+        required_chats = self.get_access_required_chats()
+        if not required_chats or self.db.is_admin(user_id):
+            return []
+
+        missing_chats: List[Dict[str, str]] = []
+        for chat_id, chat_type, title, username, invite_link in required_chats:
+            try:
+                member = self.updater.bot.get_chat_member(int(chat_id), user_id)
+                status = getattr(member, "status", "")
+                if status not in {"creator", "administrator", "member", "restricted"}:
+                    missing_chats.append({
+                        "chat_id": str(chat_id),
+                        "chat_type": chat_type,
+                        "title": title,
+                        "username": username or "",
+                        "invite_link": invite_link or "",
+                    })
+            except Exception as e:
+                logger.warning(f"检查用户 {user_id} 的关注状态失败 {chat_id}: {e}")
+                missing_chats.append({
+                    "chat_id": str(chat_id),
+                    "chat_type": chat_type,
+                    "title": title,
+                    "username": username or "",
+                    "invite_link": invite_link or "",
+                })
+
+        return missing_chats
+
+    def build_access_required_keyboard(self, user_id: int, missing_chats: List[Dict[str, str]]) -> InlineKeyboardMarkup:
+        """构造强制关注提示按钮"""
+        buttons = []
+        for item in missing_chats:
+            join_url = ""
+            if item.get("invite_link"):
+                join_url = item["invite_link"]
+            elif item.get("username"):
+                join_url = f"https://t.me/{item['username'].lstrip('@')}"
+
+            if join_url:
+                label = "📢 打开频道" if item.get("chat_type") == "channel" else "👥 打开群组"
+                buttons.append([InlineKeyboardButton(f"{label} · {item.get('title', '未命名')[:28]}", url=join_url)])
+
+        buttons.append([InlineKeyboardButton("✅ 我已完成，重新检查", callback_data="check_access_again")])
+        buttons.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_main")])
+        return InlineKeyboardMarkup(buttons)
+
+    def build_access_required_text(self, missing_chats: List[Dict[str, str]]) -> str:
+        """构造强制关注提示文本"""
+        lines = [
+            "<b>⚠️ 使用前请先完成关注/加群</b>",
+            "",
+            "你需要先加入下面配置的频道或群组，完成后再点“我已完成，重新检查”。",
+            "",
+            "<b>当前还缺少：</b>",
+        ]
+
+        for item in missing_chats:
+            prefix = "📢" if item.get("chat_type") == "channel" else "👥"
+            lines.append(f"{prefix} {item.get('title', '未命名目标')}")
+            if not item.get("invite_link") and not item.get("username"):
+                lines.append("   无公开链接，请联系管理员提供可加入入口。")
+
+        return "\n".join(lines)
+
+    def ensure_update_access(self, update: Update, user_id: int) -> bool:
+        """普通消息入口的强制关注校验"""
+        if self.db.is_admin(user_id):
+            return True
+
+        missing_chats = self.get_missing_required_chats(user_id)
+        if not missing_chats:
+            return True
+
+        self.safe_send_message(
+            update,
+            self.build_access_required_text(missing_chats),
+            'HTML',
+            self.build_access_required_keyboard(user_id, missing_chats)
+        )
+        return False
+
+    def ensure_query_access(self, update: Update, query, user_id: int) -> bool:
+        """回调入口的强制关注校验"""
+        if self.db.is_admin(user_id):
+            return True
+
+        missing_chats = self.get_missing_required_chats(user_id)
+        if not missing_chats:
+            return True
+
+        query.answer("请先完成关注/加群", show_alert=True)
+        self.safe_edit_message(
+            query,
+            self.build_access_required_text(missing_chats),
+            'HTML',
+            self.build_access_required_keyboard(user_id, missing_chats)
+        )
+        return False
     
     def setup_handlers(self):
         self.dp.add_handler(CommandHandler("start", self.start_command))
@@ -11796,51 +11983,34 @@ class EnhancedBot:
     
     def show_main_menu(self, update: Update, user_id: int):
         """显示主菜单（统一方法）"""
-        # 获取用户信息
         if update.callback_query:
             first_name = update.callback_query.from_user.first_name or t(user_id, 'default_user')
         else:
             first_name = update.effective_user.first_name or t(user_id, 'default_user')
-        
-        # 获取会员状态（使用 check_membership 方法）
-        is_member, level, expiry = self.db.check_membership(user_id)
-        
+
         if self.db.is_admin(user_id):
-            member_status = t(user_id, 'status_admin')
-        elif is_member:
-            # 翻译会员等级
-            if level == "会员":
-                translated_level = t(user_id, 'member_level_member')
-            elif level == "管理员":
-                translated_level = t(user_id, 'member_level_admin')
-            else:
-                translated_level = level  # 保留其他未知等级
-            member_status = f"🎁 {translated_level}"
+            member_status = "管理员"
+            expiry = "管理员直通"
         else:
-            member_status = t(user_id, 'status_no_member')
-        
-        # 翻译到期时间
-        if expiry == "永久有效":
-            expiry = t(user_id, 'expiry_permanent')
-        
-        # 构建翻译后的欢迎文本
-        proxy_mode_text = t(user_id, 'proxy_mode_enabled') if self.proxy_manager.is_proxy_mode_active(self.db) else t(user_id, 'proxy_mode_local')
-        proxy_count_text = t(user_id, 'proxy_count_value').format(count=len(self.proxy_manager.proxies))
-        
+            missing_chats = self.get_missing_required_chats(user_id)
+            if missing_chats:
+                member_status = "未满足使用条件"
+                expiry = "请先关注或加入后台配置的频道或群组"
+            else:
+                member_status = "已满足使用条件"
+                expiry = "无需充值，保持关注即可使用"
+
         welcome_text = f"""
 <b>{t(user_id, 'bot_title')}</b>
 
-👤 <b>{t(user_id, 'user_info')}</b>
-• {t(user_id, 'user_nickname')}: {first_name}
-• {t(user_id, 'user_id')}: <code>{user_id}</code>
-• {t(user_id, 'user_membership')}: {member_status}
-• {t(user_id, 'user_expiry')}: {expiry}
-• {t(user_id, 'current_time')}: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S CST')}
+<b>{t(user_id, 'user_info')}</b>
+? {t(user_id, 'user_nickname')}: {first_name}
+? {t(user_id, 'user_id')}: <code>{user_id}</code>
+? {t(user_id, 'user_membership')}: {member_status}
+? {t(user_id, 'user_expiry')}: {expiry}
+? {t(user_id, 'current_time')}: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S CST')}
         """
-        
-        
 
-        # 创建横排2x2布局的主菜单按钮（在原有两行后新增一行"🔗 API转换"）
         buttons = [
             [
                 InlineKeyboardButton(t(user_id, 'btn_account_check'), callback_data="start_check"),
@@ -11873,31 +12043,22 @@ class EnhancedBot:
             [
                 InlineKeyboardButton(t(user_id, 'btn_profile_update'), callback_data="profile_update_start"),
                 InlineKeyboardButton(t(user_id, 'btn_check_contact_limit'), callback_data="check_contact_limit")
-            ],
-            [
-                InlineKeyboardButton(t(user_id, 'btn_vip_menu'), callback_data="vip_menu")
             ]
         ]
 
-
-        # 管理员按钮
         if self.db.is_admin(user_id):
             buttons.append([
                 InlineKeyboardButton(t(user_id, 'btn_admin_panel'), callback_data="admin_panel"),
                 InlineKeyboardButton(t(user_id, 'btn_proxy_panel'), callback_data="proxy_panel")
             ])
 
-        # 语言切换按钮（改为打开语言选择菜单）
         if I18N_AVAILABLE:
             buttons.append([
                 InlineKeyboardButton(t(user_id, 'btn_language_menu'), callback_data="language_menu")
             ])
 
-
-        
         keyboard = InlineKeyboardMarkup(buttons)
-        
-        # 判断是编辑消息还是发送新消息
+
         if update.callback_query:
             update.callback_query.answer()
             try:
@@ -11907,7 +12068,7 @@ class EnhancedBot:
                     parse_mode='HTML'
                 )
             except Exception as e:
-                print(f"⚠️ 编辑消息失败: {e}")
+                print(f"edit main menu failed: {e}")
         else:
             self.safe_send_message(update, welcome_text, 'HTML', keyboard)
     
@@ -11944,7 +12105,7 @@ class EnhancedBot:
 
         # 权限检查
         is_member, level, _ = self.db.check_membership(user_id)
-        if not is_member and not self.db.is_admin(user_id):
+        if False:
             self.safe_send_message(update, "❌ 需要会员权限才能使用API转换功能")
             return
 
@@ -12884,6 +13045,17 @@ class EnhancedBot:
         query = update.callback_query
         data = query.data
         user_id = query.from_user.id  # ← 添加这一行
+        if data == "check_access_again":
+            if self.ensure_query_access(update, query, user_id):
+                self.show_main_menu(update, user_id)
+            return
+        if self.is_payment_feature_callback(data):
+            query.answer("充值系统已关闭", show_alert=True)
+            self.show_main_menu(update, user_id)
+            return
+        if not self.db.is_admin(user_id) and not self.is_access_exempt_callback(data):
+            if not self.ensure_query_access(update, query, user_id):
+                return
         if data == "start_check":
             self.handle_start_check(query)
         elif data == "format_conversion":
@@ -13146,6 +13318,12 @@ class EnhancedBot:
             self.handle_admin_search(query)
         elif data == "admin_recent":
             self.handle_admin_recent(query)
+        elif data == "admin_access_menu":
+            self.handle_admin_access_menu(query)
+        elif data == "admin_access_add":
+            self.handle_admin_access_add(query)
+        elif data.startswith("admin_access_remove_"):
+            self.handle_admin_access_remove(query, data.replace("admin_access_remove_", "", 1))
         elif data == "admin_payment_stats":
             self.handle_admin_payment_stats(query)
         elif data == "admin_payment_orders":
@@ -13606,38 +13784,35 @@ class EnhancedBot:
     def handle_admin_panel(self, query):
         """Admin Panel"""
         user_id = query.from_user.id
-        
+
         if not self.db.is_admin(user_id):
             query.answer(t(user_id, 'admin_panel_access_denied'))
             return
-        
-        # Get statistics
+
         stats = self.db.get_user_statistics()
         admin_count = len(self.db.get_all_admins()) if self.db.get_all_admins() else 0
-        
         admin_permission = t(user_id, 'admin_super_admin') if user_id in config.ADMIN_IDS else t(user_id, 'admin_normal_admin')
-        
+        required_count = len(self.get_access_required_chats())
+
         admin_text = f"""
 <b>{t(user_id, 'admin_panel_title')}</b>
 
 <b>{t(user_id, 'admin_system_stats')}</b>
-• {t(user_id, 'admin_total_users')}: {stats.get('total_users', 0)}
-• {t(user_id, 'admin_today_active')}: {stats.get('today_active', 0)}
-• {t(user_id, 'admin_week_active')}: {stats.get('week_active', 0)}
-• {t(user_id, 'admin_active_members')}: {stats.get('active_members', 0)}
-• {t(user_id, 'admin_trial_members')}: {stats.get('trial_members', 0)}
-• {t(user_id, 'admin_recent_users')}: {stats.get('recent_users', 0)}
+? {t(user_id, 'admin_total_users')}: {stats.get('total_users', 0)}
+? {t(user_id, 'admin_today_active')}: {stats.get('today_active', 0)}
+? {t(user_id, 'admin_week_active')}: {stats.get('week_active', 0)}
+? {t(user_id, 'admin_recent_users')}: {stats.get('recent_users', 0)}
+? 强制关注目标: {required_count}
 
 <b>{t(user_id, 'admin_info')}</b>
-• {t(user_id, 'admin_count')}: {admin_count}
-• {t(user_id, 'admin_your_permission')}: {admin_permission}
-• {t(user_id, 'admin_system_time')}: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S CST')}
+? {t(user_id, 'admin_count')}: {admin_count}
+? {t(user_id, 'admin_your_permission')}: {admin_permission}
+? {t(user_id, 'admin_system_time')}: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S CST')}
 
 <b>{t(user_id, 'admin_quick_actions')}</b>
 {t(user_id, 'admin_quick_actions_desc')}
         """
-        
-        # Create admin buttons
+
         buttons = [
             [
                 InlineKeyboardButton(t(user_id, 'admin_btn_user_management'), callback_data="admin_users"),
@@ -13652,25 +13827,14 @@ class EnhancedBot:
                 InlineKeyboardButton(t(user_id, 'admin_btn_recent_users'), callback_data="admin_recent")
             ],
             [
-                InlineKeyboardButton(t(user_id, 'btn_admin_payment_stats'), callback_data="admin_payment_stats"),
-                InlineKeyboardButton(t(user_id, 'btn_admin_payment_orders'), callback_data="admin_payment_orders")
-            ],
-            [
-                InlineKeyboardButton(t(user_id, 'btn_admin_payment_export'), callback_data="admin_payment_export")
-            ],
-            [
-                InlineKeyboardButton(t(user_id, 'admin_btn_card_activation'), callback_data="admin_card_menu"),
-                InlineKeyboardButton(t(user_id, 'admin_btn_manual_activation'), callback_data="admin_manual_menu")
-            ],
-            [
-                InlineKeyboardButton(t(user_id, 'admin_btn_revoke_membership'), callback_data="admin_revoke_menu")
+                InlineKeyboardButton("📢 关注配置", callback_data="admin_access_menu")
             ],
             [
                 InlineKeyboardButton(t(user_id, 'admin_btn_broadcast'), callback_data="broadcast_menu")
             ],
             [InlineKeyboardButton(f"🔙 {t(user_id, 'btn_back_to_menu')}", callback_data="back_to_main")]
         ]
-        
+
         keyboard = InlineKeyboardMarkup(buttons)
         self.safe_edit_message(query, admin_text, 'HTML', keyboard)
     def handle_admin_users(self, query):
@@ -14560,6 +14724,9 @@ class EnhancedBot:
                 return
 
             user_status = row[0]
+            if not self.db.is_admin(user_id):
+                if not self.ensure_update_access(update, user_id):
+                    return
         except Exception:
             self.safe_send_message(update, "❌ 系统错误，请重试")
             return
@@ -14583,7 +14750,6 @@ class EnhancedBot:
             self.safe_send_message(update, t(user_id, 'error_upload_zip_only'))
             return
 
-        is_member, _, _ = self.db.check_membership(user_id)
         if not is_member and not self.db.is_admin(user_id):
             self.safe_send_message(update, "❌ 需要会员权限")
             return
@@ -16076,6 +16242,9 @@ class EnhancedBot:
             
             if row:
                 user_status = row[0]
+                if user_status and not self.db.is_admin(user_id):
+                    if not self.ensure_update_access(update, user_id):
+                        return
                 
                 if user_status == "waiting_broadcast_title":
                     self.handle_broadcast_title_input(update, context, user_id, text)
@@ -16101,6 +16270,9 @@ class EnhancedBot:
                     return
                 elif user_status == "waiting_admin_query_user":
                     self.handle_admin_user_query_result(update, user_id, text)
+                    return
+                elif user_status == "waiting_access_chat_add":
+                    self.handle_admin_access_add_input(update, user_id, text)
                     return
                 elif user_status == "waiting_rename_newname":
                     self.handle_rename_newname_input(update, context, user_id, text)
