@@ -13837,6 +13837,190 @@ class EnhancedBot:
 
         keyboard = InlineKeyboardMarkup(buttons)
         self.safe_edit_message(query, admin_text, 'HTML', keyboard)
+
+    def handle_admin_access_menu(self, query):
+        """强制关注配置管理"""
+        user_id = query.from_user.id
+
+        if not self.db.is_admin(user_id):
+            query.answer(t(user_id, 'admin_panel_access_denied'))
+            return
+
+        query.answer()
+        required_chats = self.get_access_required_chats()
+
+        text_lines = [
+            "<b>📢 关注配置</b>",
+            "",
+            "配置后，普通用户必须先关注频道或加入群组，才能继续使用机器人。",
+            "",
+            "<b>当前已配置目标：</b>",
+        ]
+
+        if required_chats:
+            for index, (chat_id, chat_type, title, username, invite_link) in enumerate(required_chats, 1):
+                icon = "📢" if chat_type == "channel" else "👥"
+                text_lines.append(f"{index}. {icon} {title}")
+                text_lines.append(f"   ID: <code>{chat_id}</code>")
+                if username:
+                    text_lines.append(f"   用户名: @{username.lstrip('@')}")
+                elif invite_link:
+                    text_lines.append("   类型: 邀请链接目标")
+                else:
+                    text_lines.append("   类型: 私有目标（需机器人能校验成员）")
+                text_lines.append("")
+        else:
+            text_lines.append("暂未配置任何频道或群组。")
+            text_lines.append("")
+
+        text_lines.extend([
+            "<b>添加说明</b>",
+            "支持输入 @频道用户名、公开 t.me 链接，或群组/频道 chat_id（如 -100...）。",
+            "建议先把机器人拉进目标频道/群组，否则成员校验可能不稳定。",
+        ])
+
+        buttons = [[InlineKeyboardButton("➕ 添加关注目标", callback_data="admin_access_add")]]
+        for chat_id, chat_type, title, username, invite_link in required_chats:
+            short_title = (title or str(chat_id))[:18]
+            icon = "📢" if chat_type == "channel" else "👥"
+            buttons.append([
+                InlineKeyboardButton(f"🗑 删除 {icon} {short_title}", callback_data=f"admin_access_remove_{chat_id}")
+            ])
+        buttons.append([InlineKeyboardButton(t(user_id, 'admin_btn_back_panel'), callback_data="admin_panel")])
+
+        self.safe_edit_message(query, "\n".join(text_lines), 'HTML', InlineKeyboardMarkup(buttons))
+
+    def handle_admin_access_add(self, query):
+        """进入添加强制关注目标输入态"""
+        user_id = query.from_user.id
+
+        if not self.db.is_admin(user_id):
+            query.answer(t(user_id, 'admin_panel_access_denied'))
+            return
+
+        query.answer()
+        self.db.save_user(
+            user_id,
+            query.from_user.username or "",
+            query.from_user.first_name or "",
+            "waiting_access_chat_add"
+        )
+
+        text = (
+            "<b>➕ 添加关注目标</b>\n\n"
+            "请发送以下任意一种格式：\n"
+            "• <code>@channel_username</code>\n"
+            "• <code>https://t.me/channel_username</code>\n"
+            "• <code>-100xxxxxxxxxx</code>\n\n"
+            "只支持频道、群组、超级群组。\n"
+            "发送后我会自动识别并保存。"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 返回关注配置", callback_data="admin_access_menu")]
+        ])
+        self.safe_edit_message(query, text, 'HTML', keyboard)
+
+    def handle_admin_access_remove(self, query, chat_id: str):
+        """删除强制关注目标"""
+        user_id = query.from_user.id
+
+        if not self.db.is_admin(user_id):
+            query.answer(t(user_id, 'admin_panel_access_denied'))
+            return
+
+        removed = self.db.remove_required_chat(chat_id)
+        query.answer("✅ 已删除" if removed else "⚠️ 目标不存在", show_alert=not removed)
+        self.handle_admin_access_menu(query)
+
+    def handle_admin_access_add_input(self, update: Update, user_id: int, raw_text: str):
+        """处理管理员输入的强制关注目标"""
+        self.db.save_user(
+            user_id,
+            update.effective_user.username or "",
+            update.effective_user.first_name or "",
+            "active"
+        )
+
+        text = (raw_text or "").strip()
+        if not text:
+            self.safe_send_message(update, "❌ 输入不能为空。", 'HTML')
+            return
+
+        target: Any = text
+        if text.startswith("https://t.me/") or text.startswith("http://t.me/"):
+            target = text.rstrip("/").split("/")[-1]
+            if target.startswith("+"):
+                target = text
+            else:
+                target = f"@{target}"
+        elif text.startswith("t.me/"):
+            target = text.rstrip("/").split("/")[-1]
+            target = text if str(target).startswith("+") else f"@{target}"
+        elif re.fullmatch(r"-?\d+", text):
+            target = int(text)
+        elif text.startswith("@"):
+            target = text
+
+        try:
+            chat = self.updater.bot.get_chat(target)
+        except Exception as e:
+            logger.error(f"获取关注目标失败: {e}")
+            self.safe_send_message(
+                update,
+                "❌ 无法识别这个频道/群组。\n\n"
+                "请检查：\n"
+                "• 用户名/链接是否正确\n"
+                "• 机器人是否已经在目标群组或频道里\n"
+                "• 如果是私有群/频道，优先发送 chat_id",
+                'HTML'
+            )
+            return
+
+        if chat.type not in {"channel", "group", "supergroup"}:
+            self.safe_send_message(update, "❌ 只支持频道、群组、超级群组。", 'HTML')
+            return
+
+        username = getattr(chat, "username", "") or ""
+        invite_link = ""
+        if username:
+            invite_link = f"https://t.me/{username.lstrip('@')}"
+        else:
+            invite_link = getattr(chat, "invite_link", "") or ""
+
+        saved = self.db.add_required_chat(
+            chat.id,
+            chat.type,
+            getattr(chat, "title", None) or getattr(chat, "full_name", None) or str(chat.id),
+            username,
+            invite_link,
+            user_id
+        )
+
+        if not saved:
+            self.safe_send_message(update, "❌ 保存关注目标失败，请稍后重试。", 'HTML')
+            return
+
+        icon = "📢" if chat.type == "channel" else "👥"
+        text = (
+            f"<b>✅ 已添加关注目标</b>\n\n"
+            f"{icon} 名称：{getattr(chat, 'title', None) or getattr(chat, 'full_name', None) or chat.id}\n"
+            f"ID：<code>{chat.id}</code>\n"
+            f"类型：{chat.type}\n"
+        )
+        if username:
+            text += f"用户名：@{username.lstrip('@')}\n"
+        elif invite_link:
+            text += "入口：已记录邀请链接\n"
+        else:
+            text += "入口：无公开入口，后续校验依赖机器人在目标内可读成员状态\n"
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 返回关注配置", callback_data="admin_access_menu")],
+            [InlineKeyboardButton(t(user_id, 'admin_btn_back_panel'), callback_data="admin_panel")]
+        ])
+        self.safe_send_message(update, text, 'HTML', keyboard)
+
     def handle_admin_users(self, query):
         """User Management Interface"""
         user_id = query.from_user.id
