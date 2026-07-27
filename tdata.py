@@ -10453,6 +10453,83 @@ class BatchCreatorService:
         self.daily_limit = config_obj.BATCH_CREATE_DAILY_LIMIT
         
         logger.info(f"📦 批量创建服务初始化，每日限制: {self.daily_limit}")
+
+    def normalize_proxy_config(self, proxy_config: Optional[Any]) -> Optional[Any]:
+        """兼容旧代理格式，统一转换为 Telethon 可用配置。"""
+        if not proxy_config:
+            return None
+
+        if isinstance(proxy_config, dict):
+            if 'proxy_type' in proxy_config and 'addr' in proxy_config and 'port' in proxy_config:
+                return proxy_config
+
+            if 'host' in proxy_config and 'port' in proxy_config:
+                proxy_type_map = {
+                    'http': socks.HTTP,
+                    'https': socks.HTTP,
+                    'socks4': socks.SOCKS4,
+                    'socks5': socks.SOCKS5
+                }
+                proxy_type = proxy_type_map.get(str(proxy_config.get('type', 'http')).lower(), socks.HTTP)
+                normalized = {
+                    'proxy_type': proxy_type,
+                    'addr': proxy_config['host'],
+                    'port': proxy_config['port']
+                }
+                if proxy_config.get('username') and proxy_config.get('password'):
+                    normalized['username'] = proxy_config.get('username')
+                    normalized['password'] = proxy_config.get('password')
+                if 'rdns' in proxy_config:
+                    normalized['rdns'] = proxy_config.get('rdns')
+                return normalized
+
+            return proxy_config
+
+        if isinstance(proxy_config, (tuple, list)):
+            parts = list(proxy_config)
+            if len(parts) == 6:
+                proxy_type, addr, port, rdns, username, password = parts
+                normalized = {
+                    'proxy_type': proxy_type,
+                    'addr': addr,
+                    'port': port,
+                    'rdns': rdns
+                }
+                if username and password:
+                    normalized['username'] = username
+                    normalized['password'] = password
+                return normalized
+
+            if len(parts) == 5:
+                proxy_type, addr, port, username, password = parts
+                normalized = {
+                    'proxy_type': proxy_type,
+                    'addr': addr,
+                    'port': port
+                }
+                if username and password:
+                    normalized['username'] = username
+                    normalized['password'] = password
+                return normalized
+
+            if len(parts) == 4:
+                proxy_type, addr, port, rdns = parts
+                return {
+                    'proxy_type': proxy_type,
+                    'addr': addr,
+                    'port': port,
+                    'rdns': rdns
+                }
+
+            if len(parts) == 2:
+                addr, port = parts
+                return {
+                    'proxy_type': socks.HTTP,
+                    'addr': addr,
+                    'port': port
+                }
+
+        return proxy_config
     
     def generate_random_username(self) -> str:
         """生成随机用户名 - 完全随机，无前缀，避免相似"""
@@ -10501,7 +10578,7 @@ class BatchCreatorService:
         account: BatchAccountInfo,
         api_id: int,
         api_hash: str,
-        proxy_dict: Optional[Dict] = None,
+        proxy_dict: Optional[Any] = None,
         user_id: Optional[int] = None
     ) -> Tuple[bool, Optional[str]]:
         """验证账号有效性 - 支持TData自动转换"""
@@ -10556,6 +10633,8 @@ class BatchCreatorService:
             # 移除.session后缀（如果有）因为TelegramClient会自动添加
             session_base = session_path.replace('.session', '') if session_path.endswith('.session') else session_path
             
+            proxy_dict = self.normalize_proxy_config(proxy_dict)
+
             client = TelegramClient(
                 session_base,
                 api_id,
@@ -10730,11 +10809,13 @@ class BatchCreatorService:
             if not account.client:
                 # 【关键修复】移除.session后缀（如果有），因为TelegramClient会自动添加
                 session_base = account.session_path.replace('.session', '') if account.session_path.endswith('.session') else account.session_path
+                normalized_proxy = self.normalize_proxy_config(account.proxy_dict)
+                account.proxy_dict = normalized_proxy
                 account.client = TelegramClient(
                     session_base,
                     account.api_id,
                     account.api_hash,
-                    proxy=account.proxy_dict,
+                    proxy=normalized_proxy,
                     timeout=15
                 )
                 await account.client.connect()
@@ -10920,11 +11001,14 @@ class BatchCreatorService:
                     # 这样可以确保验证和创建阶段使用相同的session文件
                     session_base = session_path.replace('.session', '') if session_path.endswith('.session') else session_path
                     
+                    normalized_proxy = self.normalize_proxy_config(account.proxy_dict)
+                    account.proxy_dict = normalized_proxy
+
                     account.client = TelegramClient(
                         session_base,
                         account.api_id,
                         account.api_hash,
-                        proxy=account.proxy_dict,
+                        proxy=normalized_proxy,
                         timeout=15
                     )
                     await account.client.connect()
@@ -22722,14 +22806,7 @@ class EnhancedBot:
                 if self.proxy_manager.is_proxy_mode_active(self.db):
                     proxy_info = self.proxy_manager.get_next_proxy()
                     if proxy_info:
-                        proxy_dict = (
-                            socks.SOCKS5 if proxy_info['type'] == 'socks5' else socks.HTTP,
-                            proxy_info['host'],
-                            proxy_info['port'],
-                            True,
-                            proxy_info.get('username'),
-                            proxy_info.get('password')
-                        )
+                        proxy_dict = self.checker.create_proxy_dict(proxy_info)
                 
                 # 验证账号（传入user_id以确保临时文件隔离）
                 is_valid, error = await self.batch_creator.validate_account(
