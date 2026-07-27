@@ -11367,6 +11367,83 @@ class EnhancedBot:
         """
         error_str = str(error).lower()
         return any(keyword in error_str for keyword in self.NETWORK_ERROR_KEYWORDS)
+
+    def _normalize_telethon_proxy(self, proxy_config: Optional[Any]) -> Optional[Any]:
+        """兼容旧代理格式，统一转换为 Telethon 可接受的代理配置。"""
+        if not proxy_config:
+            return None
+
+        if isinstance(proxy_config, dict):
+            if 'proxy_type' in proxy_config and 'addr' in proxy_config and 'port' in proxy_config:
+                return proxy_config
+
+            if 'host' in proxy_config and 'port' in proxy_config:
+                proxy_type_map = {
+                    'http': socks.HTTP,
+                    'https': socks.HTTP,
+                    'socks4': socks.SOCKS4,
+                    'socks5': socks.SOCKS5
+                }
+                proxy_type = proxy_type_map.get(str(proxy_config.get('type', 'http')).lower(), socks.HTTP)
+                normalized = {
+                    'proxy_type': proxy_type,
+                    'addr': proxy_config['host'],
+                    'port': proxy_config['port']
+                }
+                if proxy_config.get('username') and proxy_config.get('password'):
+                    normalized['username'] = proxy_config.get('username')
+                    normalized['password'] = proxy_config.get('password')
+                if 'rdns' in proxy_config:
+                    normalized['rdns'] = proxy_config.get('rdns')
+                return normalized
+
+            return proxy_config
+
+        if isinstance(proxy_config, (tuple, list)):
+            parts = list(proxy_config)
+            if len(parts) == 6:
+                proxy_type, addr, port, rdns, username, password = parts
+                normalized = {
+                    'proxy_type': proxy_type,
+                    'addr': addr,
+                    'port': port,
+                    'rdns': rdns
+                }
+                if username and password:
+                    normalized['username'] = username
+                    normalized['password'] = password
+                return normalized
+
+            if len(parts) == 5:
+                proxy_type, addr, port, username, password = parts
+                normalized = {
+                    'proxy_type': proxy_type,
+                    'addr': addr,
+                    'port': port
+                }
+                if username and password:
+                    normalized['username'] = username
+                    normalized['password'] = password
+                return normalized
+
+            if len(parts) == 4:
+                proxy_type, addr, port, rdns = parts
+                return {
+                    'proxy_type': proxy_type,
+                    'addr': addr,
+                    'port': port,
+                    'rdns': rdns
+                }
+
+            if len(parts) == 2:
+                addr, port = parts
+                return {
+                    'proxy_type': socks.HTTP,
+                    'addr': addr,
+                    'port': port
+                }
+
+        return proxy_config
     
     def __init__(self):
         print("🤖 初始化增强版机器人...")
@@ -24476,6 +24553,7 @@ admin3</code>
                 proxy_info = self.proxy_manager.get_next_proxy()
                 if proxy_info:
                     proxy_dict = self.checker.create_proxy_dict(proxy_info)
+                    proxy_dict = self._normalize_telethon_proxy(proxy_dict)
                     proxy_type = "住宅代理" if proxy_info.get('is_residential', False) else "代理"
                     logger.info(f"🌐 [{file_name}] 强制使用{proxy_type}（配置: REAUTH_FORCE_PROXY={config.REAUTH_FORCE_PROXY}）")
                     print(f"🌐 [{file_name}] 强制使用{proxy_type}（配置: REAUTH_FORCE_PROXY={config.REAUTH_FORCE_PROXY}）", flush=True)
@@ -24488,6 +24566,7 @@ admin3</code>
             
             # 步骤1: 创建旧客户端连接
             session_base = file_path.replace('.session', '') if file_path.endswith('.session') else file_path
+            proxy_dict = self._normalize_telethon_proxy(proxy_dict)
             
             client = TelegramClient(
                 session_base,
@@ -24587,6 +24666,7 @@ admin3</code>
             
             # 为新会话创建新路径
             new_session_path = f"{session_base}_new"
+            proxy_dict = self._normalize_telethon_proxy(proxy_dict)
             
             # 创建新客户端（使用随机设备参数的API凭据）
             new_client = TelegramClient(
