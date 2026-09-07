@@ -2323,7 +2323,20 @@ class DeviceParamsManager:
             cred = random.choice(self.params['api_credentials'])
             if ':' in cred:
                 api_id, api_hash = cred.split(':', 1)
-                return int(api_id.strip()), api_hash.strip()
+                api_id = int(api_id.strip())
+                api_hash = api_hash.strip()
+                if api_id > 0 and api_hash:
+                    return api_id, api_hash
+
+        # Fallback to .env credentials when the random credential pool file is missing
+        # or contains invalid data. Profile-related flows should still work with the
+        # main configured API credentials.
+        cfg = globals().get('config')
+        if cfg:
+            fallback_api_id = getattr(cfg, 'API_ID', 0)
+            fallback_api_hash = str(getattr(cfg, 'API_HASH', '') or '').strip()
+            if fallback_api_id and fallback_api_hash:
+                return int(fallback_api_id), fallback_api_hash
         return None, None
 
 # ================================
@@ -26011,6 +26024,15 @@ admin3</code>
         try:
             # 获取API凭据
             api_id, api_hash = self.device_params_manager.get_random_api_credentials()
+            if not api_id or not api_hash:
+                return {
+                    'success': False,
+                    'account': file_name,
+                    'file_name': file_name,
+                    'file_path': file_path,
+                    'error': '未配置 API_ID/API_HASH。请先在 .env 填写 API_ID、API_HASH，或在 device_params/api_id+api_hash.txt 提供可用凭据。',
+                    'error_type': 'MissingApiCredentials'
+                }
             
             # 创建客户端
             if file_type == 'tdata':
