@@ -1,0 +1,126 @@
+"""Session -> official Telegram Web login URLs, without logging bearer links."""
+import asyncio
+import shutil
+import stat
+import threading
+import zipfile
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit, parse_qs
+
+API_ID = 2040
+API_HASH = "b18441a1ff607e10a989891a5462e627"
+MAX_UPLOAD = 100 * 1024 * 1024
+MAX_EXTRACTED = 300 * 1024 * 1024
+MAX_SESSIONS = 200
+_active = set()
+_lock = threading.Lock()
+
+
+def claim(user_id):
+    with _lock:
+        if user_id in _active:
+            return False
+        _active.add(user_id)
+        return True
+
+
+def release(user_id):
+    with _lock:
+        _active.discard(user_id)
+
+
+def collect_sessions(upload, destination):
+    upload, destination = Path(upload), Path(destination)
+    if upload.suffix.lower() == ".session":
+        return [upload]
+    if upload.suffix.lower() != ".zip":
+        raise ValueError("Upload a .session file or a ZIP containing sessions")
+    destination.mkdir(parents=True, exist_ok=True)
+    sessions = []
+    with zipfile.ZipFile(upload) as archive:
+        entries = archive.infolist()
+        if len(entries) > 10000 or sum(item.file_size for item in entries) > MAX_EXTRACTED:
+            raise ValueError("Archive exceeds extraction limits")
+        for item in entries:
+            name = item.filename.replace(chr(92), "/")
+            path = PurePosixPath(name)
+            mode = item.external_attr >> 16
+            if path.is_absolute() or ".." in path.parts or ":" in name or stat.S_ISLNK(mode):
+                raise ValueError("Unsafe archive path")
+            if item.is_dir() or "__MACOSX" in path.parts or path.suffix.lower() != ".session":
+                continue
+            if len(sessions) >= MAX_SESSIONS:
+                raise ValueError("At most 200 sessions per upload")
+            # Flatten to unique internal names; archive names cannot escape or collide.
+            target = destination / (str(len(sessions)) + ".session")
+            with archive.open(item) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output, length=65536)
+            sessions.append((target, path.as_posix()))
+    return sessions
+
+
+def accepted_url(value):
+    if not isinstance(value, str) or any(ch in value for ch in "\r\n"):
+        return False
+    try:
+        parsed = urlsplit(value)
+        fields = parse_qs(parsed.fragment)
+        return (parsed.scheme == "https" and parsed.netloc == "web.telegram.org"
+                and parsed.path in ("/", "/a/") and bool(fields.get("tgWebAuthToken")))
+    except ValueError:
+        return False
+
+
+async def request_token(client, url, functions, types):
+    try:
+        request = functions.messages.RequestUrlAuthRequest(url=url)
+    except TypeError:
+        request = functions.messages.RequestUrlAuthRequest(
+            peer=types.InputPeerEmpty(), msg_id=0, button_id=0, url=url)
+    return await client(request)
+
+
+async def generate_link(session, label, proxy=None, client_factory=None):
+    from telethon import TelegramClient, functions, types
+    factory = client_factory or TelegramClient
+    client = None
+    label = str(label).replace("\r", " ").replace("\n", " ")
+    try:
+        client = factory(str(session), API_ID, API_HASH, proxy=proxy,
+                         connection_retries=1, request_retries=0, timeout=15,
+                         flood_sleep_threshold=0)
+        async def work():
+            await asyncio.wait_for(client.connect(), 25)
+            if not await client.is_user_authorized():
+                return {"name": label, "error": "Session is not authorized"}
+            for url in ("https://web.telegram.org/a/", "https://web.telegram.org/"):
+                try:
+                    result = await asyncio.wait_for(request_token(client, url, functions, types), 25)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+                value = getattr(result, "url", None)
+                if isinstance(result, types.UrlAuthResultAccepted) and accepted_url(value):
+                    return {"name": label, "url": value}
+            return {"name": label, "error": "No accepted Web login token returned"}
+        return await asyncio.wait_for(work(), 80)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        # Exception messages can contain credentials/URLs; return only the class.
+        return {"name": label, "error": type(error).__name__}
+    finally:
+        if client is not None:
+            try:
+                await asyncio.wait_for(client.disconnect(), 5)
+            except (Exception, asyncio.CancelledError):
+                pass
+
+
+def render_txt(results):
+    lines = ["Web direct login / web直连", "请复制每个账号的完整链接到浏览器地址栏打开。",
+             "链接短时有效，请尽快使用；失效后重新生成。请勿转发登录链接。", ""]
+    for item in results:
+        lines.extend(["账号 / Account: " + item["name"], item.get("url") or "失败 / Failed: " + item.get("error", "Unknown"), ""])
+    return "\n".join(lines)

@@ -7,6 +7,7 @@ Telegram账号检测机器人 - V8.0
 
 # 放在所有 import 附近（顶层，只执行一次）
 import os
+import web_direct
 try:
     import argparse
     from dotenv import load_dotenv, find_dotenv
@@ -12307,6 +12308,7 @@ class EnhancedBot:
                 InlineKeyboardButton(t(user_id, 'btn_reauthorize'), callback_data="reauthorize_start"),
                 InlineKeyboardButton(t(user_id, 'btn_check_registration'), callback_data="check_registration_start")
             ],
+            [InlineKeyboardButton("🌐 web直连", callback_data="web_direct_start")],
             [
                 InlineKeyboardButton(t(user_id, 'btn_profile_update'), callback_data="profile_update_start"),
                 InlineKeyboardButton(t(user_id, 'btn_check_contact_limit'), callback_data="check_contact_limit")
@@ -13324,6 +13326,18 @@ class EnhancedBot:
         if not self.db.is_admin(user_id) and not self.is_access_exempt_callback(data):
             if not self.ensure_query_access(update, query, user_id):
                 return
+        if data == "web_direct_start":
+            query.answer()
+            if query.message.chat.type != "private":
+                self.safe_edit_message(query, "请私聊机器人使用 web直连。")
+                return
+            self.db.save_user(user_id, query.from_user.username or "", query.from_user.first_name or "", "waiting_web_direct_file")
+            self.safe_edit_message(query,
+                "🌐 web直连\n\n上传单个 .session 文件，或包含多个 session 的 ZIP（最多200个账号、100MB）。\n"
+                "仅处理你有权使用的账号。返回 TXT，内含各账号的 Web 登录链接。\n"
+                "请复制完整链接到浏览器地址栏打开；链接短时有效，请尽快使用。",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("返回主菜单", callback_data="back_to_main")]]))
+            return
         if data == "start_check":
             self.handle_start_check(query)
         elif data == "format_conversion":
@@ -15167,6 +15181,7 @@ class EnhancedBot:
                 "registration_check_upload",
                 "profile_update_upload",
                 "waiting_contact_check_file",
+                "waiting_web_direct_file",
             ]
             
             # 添加自定义资料上传状态
@@ -15199,6 +15214,32 @@ class EnhancedBot:
             self.handle_profile_custom_file_upload(update, context, user_id, field_name, document)
             return
         
+        if user_status == "waiting_web_direct_file":
+            if update.effective_chat.type != "private":
+                self.safe_send_message(update, "请私聊机器人上传 session，结果只会私发给你。")
+                return
+            if not str(document.file_name or "").lower().endswith((".session", ".zip")):
+                self.safe_send_message(update, "请上传 .session 文件或包含 session 的 ZIP。")
+                return
+            if (document.file_size or 0) > web_direct.MAX_UPLOAD:
+                self.safe_send_message(update, "文件过大，限制100MB。")
+                return
+            if not web_direct.claim(user_id):
+                self.safe_send_message(update, "上一批 web直连任务仍在处理，请稍候。")
+                return
+            self.db.save_user(user_id, update.effective_user.username or "", update.effective_user.first_name or "", "")
+            def run_web_direct():
+                try:
+                    asyncio.run(self.process_web_direct(update, context, document))
+                finally:
+                    web_direct.release(user_id)
+            try:
+                threading.Thread(target=run_web_direct, daemon=True).start()
+            except Exception:
+                web_direct.release(user_id)
+                self.safe_send_message(update, "任务启动失败，请重新选择 web直连。")
+            return
+
         # 其他功能需要ZIP格式
         if not document.file_name.lower().endswith('.zip'):
             self.safe_send_message(update, t(user_id, 'error_upload_zip_only'))
@@ -15412,6 +15453,50 @@ class EnhancedBot:
             ""
         )
 
+
+    async def process_web_direct(self, update, context, document):
+        """Generate and privately deliver small batches before links expire."""
+        user_id = update.effective_user.id
+        progress = self.safe_send_message(update, "🌐 正在生成 Web 登录链接，结果将以 TXT 私发。")
+        success = failed = 0
+        try:
+            with tempfile.TemporaryDirectory(prefix="web_direct_") as directory:
+                suffix = ".session" if str(document.file_name).lower().endswith(".session") else ".zip"
+                upload = Path(directory) / ("upload" + suffix)
+                document.get_file().download(str(upload))
+                if upload.stat().st_size > web_direct.MAX_UPLOAD:
+                    raise ValueError("Upload exceeds 100MB")
+                found = web_direct.collect_sessions(upload, Path(directory) / "sessions")
+                if suffix == ".session":
+                    found = [(upload, Path(str(document.file_name)).name)]
+                if not found:
+                    self.safe_send_message(update, "未找到 .session 文件，请检查上传内容。")
+                    return
+                for offset in range(0, len(found), 5):
+                    batch = []
+                    for path, label in found[offset:offset + 5]:
+                        proxy = None
+                        if self.proxy_manager.is_proxy_mode_active(self.db):
+                            info = self.proxy_manager.get_next_proxy()
+                            if not info:
+                                raise ValueError("Proxy mode enabled but no proxy is available")
+                            proxy = self._normalize_telethon_proxy(self.checker.create_proxy_dict(info))
+                        batch.append((path, label, proxy))
+                    results = await asyncio.gather(*(web_direct.generate_link(path, label, proxy=proxy) for path, label, proxy in batch))
+                    success += sum(bool(item.get("url")) for item in results)
+                    failed += sum(not item.get("url") for item in results)
+                    output = BytesIO(web_direct.render_txt(results).encode("utf-8-sig"))
+                    output.name = f"web_links_{offset // 5 + 1}.txt"
+                    context.bot.send_document(
+                        chat_id=user_id, document=output, filename=output.name,
+                        caption="🌐 web直连：请复制 TXT 内完整链接到浏览器地址栏打开。链接短时有效，请尽快使用；请勿转发。")
+                    if progress:
+                        self.safe_edit_message_text(progress,
+                            f"🌐 已处理 {min(offset + 5, len(found))}/{len(found)}，成功 {success}，失败 {failed}。\n结果按小批次私发 TXT，请及时打开。")
+        except Exception as error:
+            # Never print traceback or tokens from authentication responses.
+            logger.warning("web_direct failed: %s", type(error).__name__)
+            self.safe_send_message(update, f"web直连处理失败：{type(error).__name__}，请检查文件或稍后重试。")
 
     async def process_api_conversion(self, update, context, document):
         """API格式转换 - 阶段1：解析文件并询问网页展示的2FA"""
