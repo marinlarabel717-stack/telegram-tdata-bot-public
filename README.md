@@ -52,3 +52,15 @@ Only use sessions you are authorized to access. Login URLs are bearer credential
 results are not logged or retained by the bot after sending, and temporary uploads
 are cleaned when the task exits. Telegram retains the delivered message/file.
 Mocked tests do not prove live token issuance or browser login acceptance.
+
+
+### Session schema compatibility
+
+Web direct reads named Telethon auth fields from SQLite in read-only mode, then
+uses a `MemorySession`. Extra columns and differing session schema versions do
+not trigger Telethon's positional SQLite unpacking or migration. The uploaded
+SQLite file is never opened by the Telegram client or modified. Pyrogram schemas,
+missing auth keys and malformed SQLite files receive explicit private errors.
+Other failures identify the stage and exception class without exposing exception
+messages that may contain bearer links. Offline fixtures cover old/new schemas;
+actual user sessions and Telegram Web login still need live acceptance testing.

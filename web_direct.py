@@ -2,6 +2,7 @@
 import asyncio
 import shutil
 import stat
+import sqlite3
 import threading
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -80,36 +81,98 @@ async def request_token(client, url, functions, types):
     return await client(request)
 
 
-async def generate_link(session, label, proxy=None, client_factory=None):
+class WebSessionError(ValueError):
+    """Controlled, credential-free error safe for the private report."""
+
+
+def load_memory_session(path):
+    """Read auth fields by name, avoiding SDK SQLite schema/version migrations."""
+    from telethon.sessions import MemorySession
+    from telethon.crypto import AuthKey
+    try:
+        connection = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+            required = {"dc_id", "server_address", "port", "auth_key"}
+            if not required.issubset(columns):
+                if {"dc_id", "auth_key", "api_id"}.issubset(columns):
+                    raise WebSessionError("检测到 Pyrogram session，请先转换为 Telethon session")
+                raise WebSessionError("session 数据结构不受支持，缺少 Telethon 授权字段")
+            row = connection.execute("SELECT dc_id, server_address, port, auth_key FROM sessions LIMIT 1").fetchone()
+            if row is None:
+                raise WebSessionError("session 中没有已登录账号的授权数据")
+            key = row["auth_key"]
+            if not isinstance(key, bytes) or len(key) != 256:
+                raise WebSessionError("session 授权密钥缺失或格式无效")
+            dc_id, address, port = int(row["dc_id"]), row["server_address"], int(row["port"])
+            if dc_id <= 0 or not isinstance(address, str) or not address or not 0 < port <= 65535:
+                raise WebSessionError("session 的数据中心连接参数无效")
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError:
+        raise WebSessionError("无法读取 session 数据库：文件损坏、非 SQLite 格式或正在被占用") from None
+    except (TypeError, ValueError) as error:
+        if isinstance(error, WebSessionError):
+            raise
+        raise WebSessionError("session 授权字段格式无效") from None
+    memory = MemorySession()
+    memory.set_dc(dc_id, address, port)
+    memory.auth_key = AuthKey(data=key)
+    return memory
+
+
+def describe_error(error, stage):
+    if isinstance(error, WebSessionError):
+        return str(error)
+    names = {"load": "读取session", "init": "创建客户端", "connect": "连接Telegram",
+             "authorize": "检查登录状态", "token": "请求Web链接"}
+    hints = {"ValueError": "会话结构或连接参数不兼容", "TimeoutError": "请求超时，请检查代理或网络",
+             "AuthKeyUnregisteredError": "session 授权已失效", "SessionRevokedError": "session 已被撤销",
+             "UserDeactivatedBanError": "账号已被封禁", "FloodWaitError": "Telegram 限流，请稍后重试"}
+    kind = type(error).__name__
+    return names.get(stage, stage) + "：" + kind + ("（" + hints[kind] + "）" if kind in hints else "")
+
+
+async def generate_link(session, label, proxy=None, client_factory=None, session_loader=None):
     from telethon import TelegramClient, functions, types
     factory = client_factory or TelegramClient
     client = None
+    stage = "load"
     label = str(label).replace("\r", " ").replace("\n", " ")
     try:
-        client = factory(str(session), API_ID, API_HASH, proxy=proxy,
+        authorized_session = (session_loader or load_memory_session)(session)
+        stage = "init"
+        client = factory(authorized_session, API_ID, API_HASH, proxy=proxy,
                          connection_retries=1, request_retries=0, timeout=15,
                          flood_sleep_threshold=0)
         async def work():
+            nonlocal stage
+            stage = "connect"
             await asyncio.wait_for(client.connect(), 25)
+            stage = "authorize"
             if not await client.is_user_authorized():
                 return {"name": label, "error": "Session is not authorized"}
+            last_error = None
+            stage = "token"
             for url in ("https://web.telegram.org/a/", "https://web.telegram.org/"):
                 try:
                     result = await asyncio.wait_for(request_token(client, url, functions, types), 25)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as error:
+                    last_error = describe_error(error, stage)
                     continue
                 value = getattr(result, "url", None)
                 if isinstance(result, types.UrlAuthResultAccepted) and accepted_url(value):
                     return {"name": label, "url": value}
-            return {"name": label, "error": "No accepted Web login token returned"}
+            return {"name": label, "error": last_error or "Telegram 未返回可用的 Web 登录链接"}
         return await asyncio.wait_for(work(), 80)
     except asyncio.CancelledError:
         raise
     except Exception as error:
         # Exception messages can contain credentials/URLs; return only the class.
-        return {"name": label, "error": type(error).__name__}
+        return {"name": label, "error": describe_error(error, stage)}
     finally:
         if client is not None:
             try:

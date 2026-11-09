@@ -39,7 +39,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             async def __call__(self, request): return Accepted(URL)
         factory = MagicMock(return_value=Client())
         with patch.dict(sys.modules, {'telethon': self.library()}):
-            result = await web_direct.generate_link('test.session', 'a.session', client_factory=factory)
+            result = await web_direct.generate_link('test.session', 'a.session', client_factory=factory, session_loader=lambda path:path)
         self.assertEqual(result['url'], URL)
         client.disconnect.assert_awaited_once()
         self.assertEqual(factory.call_args.args[1], 2040)
@@ -47,15 +47,15 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def test_unauthorized_cleans_up(self):
         client = MagicMock(connect=AsyncMock(), disconnect=AsyncMock(), is_user_authorized=AsyncMock(return_value=False))
         with patch.dict(sys.modules, {'telethon': self.library()}):
-            result = await web_direct.generate_link('test.session', 'a', client_factory=lambda *a, **kw: client)
+            result = await web_direct.generate_link('test.session', 'a', client_factory=lambda *a, **kw: client, session_loader=lambda path:path)
         self.assertNotIn('url', result)
         client.disconnect.assert_awaited_once()
 
     async def test_failure_does_not_expose_exception_secret(self):
         client = MagicMock(connect=AsyncMock(side_effect=RuntimeError('secret token')), disconnect=AsyncMock())
         with patch.dict(sys.modules, {'telethon': self.library()}):
-            result = await web_direct.generate_link('test.session', 'a', client_factory=lambda *a, **kw: client)
-        self.assertEqual(result['error'], 'RuntimeError')
+            result = await web_direct.generate_link('test.session', 'a', client_factory=lambda *a, **kw: client, session_loader=lambda path:path)
+        self.assertIn('RuntimeError', result['error'])
         self.assertNotIn('secret', str(result))
 
     async def test_request_legacy_constructor(self):
@@ -143,5 +143,53 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(URL, delivered[0][2].decode('utf-8-sig'))
         self.assertFalse(Path(downloads[0]).exists())
         self.assertIn('浏览器', delivered[0][3])
+
+class SessionSchemaTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            import telethon
+        except ImportError:
+            self.skipTest("Telethon is required for real offline session compatibility tests")
+
+    def test_new_and_old_schema_read_without_mutation(self):
+        import sqlite3
+        for extra in (False, True):
+            with self.subTest(extra_field=extra), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)/"account.session"
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE version (version INTEGER)")
+                connection.execute("INSERT INTO version VALUES(999)")
+                columns = "dc_id INTEGER, server_address TEXT, port INTEGER, auth_key BLOB, takeout_id INTEGER"
+                if extra:
+                    columns += ", tmp_auth_key BLOB"
+                connection.execute("CREATE TABLE sessions(" + columns + ")")
+                values = (2, "149.154.167.51", 443, bytes(range(256)), None) + ((None,) if extra else ())
+                connection.execute("INSERT INTO sessions VALUES(" + ",".join("?" for _ in values) + ")", values)
+                connection.commit(); connection.close()
+                before = path.read_bytes()
+                memory = web_direct.load_memory_session(path)
+                self.assertEqual(memory.auth_key.key, bytes(range(256)))
+                self.assertEqual(memory.dc_id, 2)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_invalid_file_is_actionable_without_token_leak(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/"bad.session"
+            path.write_bytes(b"invalid sqlite data")
+            with self.assertRaises(web_direct.WebSessionError) as result:
+                web_direct.load_memory_session(path)
+            self.assertIn("session", str(result.exception))
+            self.assertNotIn("invalid sqlite data", str(result.exception))
+
+    def test_pyrogram_schema_is_identified(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/"pyrogram.session"
+            connection = sqlite3.connect(path)
+            connection.execute("CREATE TABLE sessions(dc_id INTEGER, api_id INTEGER, auth_key BLOB)")
+            connection.commit(); connection.close()
+            with self.assertRaises(web_direct.WebSessionError) as result:
+                web_direct.load_memory_session(path)
+            self.assertIn("Pyrogram", str(result.exception))
 
 if __name__=='__main__': unittest.main()
