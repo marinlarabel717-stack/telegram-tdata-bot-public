@@ -15455,7 +15455,7 @@ class EnhancedBot:
 
 
     async def process_web_direct(self, update, context, document):
-        """Generate and privately deliver small batches before links expire."""
+        """Generate all results and privately deliver exactly one TXT per upload."""
         user_id = update.effective_user.id
         progress = self.safe_send_message(update, "🌐 正在生成 Web 登录链接，结果将以 TXT 私发。")
         success = failed = 0
@@ -15472,6 +15472,7 @@ class EnhancedBot:
                 if not found:
                     self.safe_send_message(update, "未找到 .session 文件，请检查上传内容。")
                     return
+                all_results = []
                 for offset in range(0, len(found), 5):
                     batch = []
                     for path, label in found[offset:offset + 5]:
@@ -15485,14 +15486,18 @@ class EnhancedBot:
                     results = await asyncio.gather(*(web_direct.generate_link(path, label, proxy=proxy) for path, label, proxy in batch))
                     success += sum(bool(item.get("url")) for item in results)
                     failed += sum(not item.get("url") for item in results)
-                    output = BytesIO(web_direct.render_txt(results).encode("utf-8-sig"))
-                    output.name = f"web_links_{offset // 5 + 1}.txt"
-                    context.bot.send_document(
-                        chat_id=user_id, document=output, filename=output.name,
-                        caption="🌐 web直连：请复制 TXT 内完整链接到浏览器地址栏打开。链接短时有效，请尽快使用；请勿转发。")
+                    all_results.extend(results)
                     if progress:
                         self.safe_edit_message_text(progress,
-                            f"🌐 已处理 {min(offset + 5, len(found))}/{len(found)}，成功 {success}，失败 {failed}。\n结果按小批次私发 TXT，请及时打开。")
+                            f"🌐 已处理 {min(offset + 5, len(found))}/{len(found)}，成功 {success}，失败 {failed}。\n全部处理完成后统一返回一份 TXT。")
+                output = BytesIO(web_direct.render_txt(all_results).encode("utf-8-sig"))
+                output.name = "web_links.txt"
+                context.bot.send_document(
+                    chat_id=user_id, document=output, filename=output.name,
+                    caption="🌐 web直连：请复制 TXT 内完整链接到浏览器地址栏打开。链接短时有效，请尽快使用；请勿转发。")
+                if progress:
+                    self.safe_edit_message_text(progress,
+                        f"🌐 处理完成，共 {len(found)} 个账号，成功 {success}，失败 {failed}。全部结果已汇总为一份 TXT 私发。")
         except Exception as error:
             # Never print traceback or tokens from authentication responses.
             logger.warning("web_direct failed: %s", type(error).__name__)

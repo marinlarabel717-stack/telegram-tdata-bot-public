@@ -1,4 +1,4 @@
-﻿import ast
+import ast
 import asyncio
 import logging
 import sys
@@ -98,6 +98,14 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError): web_direct.collect_sessions(archive, Path(directory)/'out')
 
     async def test_bot_returns_private_txt_and_cleans_temp(self):
+        await self._check_one_txt(1)
+
+    async def test_large_uploads_return_one_txt_including_failures(self):
+        for count in (6, 100, 200):
+            with self.subTest(accounts=count):
+                await self._check_one_txt(count)
+
+    async def _check_one_txt(self, count):
         # Load the touched method only: avoid booting the production bot/database.
         tree = ast.parse(Path('tdata.py').read_text(encoding='utf-8'))
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name=='EnhancedBot')
@@ -108,15 +116,28 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         downloads=[]
         def download(target):
             downloads.append(target); Path(target).write_bytes(b'fake session')
-        document = SimpleNamespace(file_name='123.session', get_file=lambda:SimpleNamespace(download=download))
+        document = SimpleNamespace(file_name='batch.zip', get_file=lambda:SimpleNamespace(download=download))
         update = SimpleNamespace(effective_user=SimpleNamespace(id=7))
         delivered=[]
         def send(**kw):
             delivered.append((kw['chat_id'], kw['filename'], kw['document'].getvalue(), kw['caption']))
         context = SimpleNamespace(bot=SimpleNamespace(send_document=send))
         bot = SimpleNamespace(safe_send_message=MagicMock(return_value=object()), safe_edit_message_text=MagicMock(), db=object(), proxy_manager=SimpleNamespace(is_proxy_mode_active=lambda db:False))
-        with patch.object(web_direct, 'generate_link', AsyncMock(return_value={'name':'123.session', 'url':URL})):
+        async def generate(path, label, proxy=None):
+            self.assertEqual(len(delivered), 0)  # no early/partial documents
+            if label == 'account-3.session':
+                return {'name':label, 'error':'Unauthorized'}
+            return {'name':label, 'url':URL}
+        found = [(Path('unused'), f'account-{index}.session') for index in range(count)]
+        with patch.object(web_direct, 'collect_sessions', return_value=found), patch.object(web_direct, 'generate_link', side_effect=generate):
             await namespace['process_web_direct'](bot, update, context, document)
+        self.assertEqual(len(delivered), 1)
+        body = delivered[0][2].decode('utf-8-sig')
+        self.assertEqual(body.count('Account: '), count)
+        for _, label in found:
+            self.assertIn(label, body)
+        if count > 3:
+            self.assertIn('Unauthorized', body)
         self.assertEqual(delivered[0][0], 7)
         self.assertTrue(delivered[0][1].endswith('.txt'))
         self.assertIn(URL, delivered[0][2].decode('utf-8-sig'))

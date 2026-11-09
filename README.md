@@ -43,8 +43,9 @@ The bot uses the supplied script's `messages.RequestUrlAuth` flow and only accep
 an official Telegram Web URL from `UrlAuthResultAccepted`.
 It does not log out the original session or change 2FA.
 
-Results are sent privately to the uploading user in UTF-8 TXT files, five accounts
-per batch so successful links can be used promptly. Each entry has its source
+Each upload returns exactly one UTF-8 TXT file privately to the uploading user,
+after all accounts have been processed (100 accounts still means one file).
+Internal bounded concurrency does not split the output. Each entry has its source
 filename and either a login link or a failure reason. Copy the **entire** link to
 the browser address bar; links are short-lived and may need regeneration.
 Only use sessions you are authorized to access. Login URLs are bearer credentials:
