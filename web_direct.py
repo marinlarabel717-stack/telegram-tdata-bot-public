@@ -131,7 +131,26 @@ def describe_error(error, stage):
              "AuthKeyUnregisteredError": "session 授权已失效", "SessionRevokedError": "session 已被撤销",
              "UserDeactivatedBanError": "账号已被封禁", "FloodWaitError": "Telegram 限流，请稍后重试"}
     kind = type(error).__name__
+    if is_flood_error(error):
+        seconds = getattr(error, "seconds", None)
+        wait = f"，至少等待 {seconds} 秒后再试" if isinstance(seconds, int) and seconds > 0 else "，Telegram 未给出等待时长，请稍后再试"
+        return names.get(stage, stage) + "：Telegram 限流（" + kind + "）" + wait + "；已停止该账号后续请求，不自动重试"
     return names.get(stage, stage) + "：" + kind + ("（" + hints[kind] + "）" if kind in hints else "")
+
+
+def is_flood_error(error):
+    return any(base.__name__ in {"FloodError", "FloodWaitError", "FloodPremiumWaitError"}
+               for base in type(error).__mro__) or getattr(error, "code", None) == 420
+
+
+def response_failure(result, types):
+    if isinstance(result, getattr(types, "UrlAuthResultDefault", ())):
+        return "Telegram 返回 UrlAuthResultDefault：本次未授权生成直连链接，可尝试浏览器扫码登录"
+    if isinstance(result, getattr(types, "UrlAuthResultRequest", ())):
+        return "Telegram 返回 UrlAuthResultRequest：需要额外授权或浏览器交互，未生成直连链接"
+    if isinstance(result, types.UrlAuthResultAccepted):
+        return "Telegram 已接受请求，但返回链接缺少有效 Web 登录 token；不能作为直连链接"
+    return "Telegram 返回未识别的授权结果；未生成直连链接"
 
 
 async def generate_link(session, label, proxy=None, client_factory=None, session_loader=None):
@@ -152,7 +171,7 @@ async def generate_link(session, label, proxy=None, client_factory=None, session
             await asyncio.wait_for(client.connect(), 25)
             stage = "authorize"
             if not await client.is_user_authorized():
-                return {"name": label, "error": "Session is not authorized"}
+                return {"name": label, "error": "Session is not authorized：当前 session 未授权或授权已失效，需要重新登录后导出有效 session"}
             last_error = None
             stage = "token"
             for url in ("https://web.telegram.org/a/", "https://web.telegram.org/"):
@@ -162,10 +181,13 @@ async def generate_link(session, label, proxy=None, client_factory=None, session
                     raise
                 except Exception as error:
                     last_error = describe_error(error, stage)
+                    if is_flood_error(error):
+                        return {"name": label, "error": last_error}
                     continue
                 value = getattr(result, "url", None)
                 if isinstance(result, types.UrlAuthResultAccepted) and accepted_url(value):
                     return {"name": label, "url": value}
+                last_error = response_failure(result, types)
             return {"name": label, "error": last_error or "Telegram 未返回可用的 Web 登录链接"}
         return await asyncio.wait_for(work(), 80)
     except asyncio.CancelledError:

@@ -15473,9 +15473,9 @@ class EnhancedBot:
                     self.safe_send_message(update, "未找到 .session 文件，请检查上传内容。")
                     return
                 all_results = []
-                for offset in range(0, len(found), 5):
+                for offset in range(0, len(found), 2):
                     batch = []
-                    for path, label in found[offset:offset + 5]:
+                    for path, label in found[offset:offset + 2]:
                         proxy = None
                         if self.proxy_manager.is_proxy_mode_active(self.db):
                             info = self.proxy_manager.get_next_proxy()
@@ -15489,7 +15489,7 @@ class EnhancedBot:
                     all_results.extend(results)
                     if progress:
                         self.safe_edit_message_text(progress,
-                            f"🌐 已处理 {min(offset + 5, len(found))}/{len(found)}，成功 {success}，失败 {failed}。\n全部处理完成后统一返回一份 TXT。")
+                            f"🌐 已处理 {min(offset + 2, len(found))}/{len(found)}，成功 {success}，失败 {failed}。\n全部处理完成后统一返回一份 TXT。")
                 output = BytesIO(web_direct.render_txt(all_results).encode("utf-8-sig"))
                 output.name = "web_links.txt"
                 context.bot.send_document(

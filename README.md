@@ -64,3 +64,18 @@ missing auth keys and malformed SQLite files receive explicit private errors.
 Other failures identify the stage and exception class without exposing exception
 messages that may contain bearer links. Offline fixtures cover old/new schemas;
 actual user sessions and Telegram Web login still need live acceptance testing.
+
+
+### Web direct login failure handling
+
+Web direct login is conditional on Telegram returning an accepted URL with a
+valid Web auth token. It is not guaranteed for every authorized session.
+Unauthorized sessions require a fresh authorized export; the bot does not relogin
+or modify the original file. Flood errors (including generic RPC 420) stop further
+URL attempts for that account immediately, report an available wait time, and
+never trigger an automatic retry. Unknown wait times are not guessed. Batch
+concurrency is two; every upload still returns exactly one consolidated TXT.
+Default/request/accepted-without-token results are distinguished in the report
+without logging their URLs or raw exception text. An interactive authorization
+request is reported, not automatically approved. Tests use offline sessions and
+mocked Telegram responses; live token generation/browser login remains unverified.

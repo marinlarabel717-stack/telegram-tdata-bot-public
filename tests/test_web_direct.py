@@ -18,6 +18,47 @@ class Accepted:
     def __init__(self, url): self.url = url
 
 class WebTests(unittest.IsolatedAsyncioTestCase):
+    async def test_flood_stops_without_second_url_and_reports_wait(self):
+        for wait in (None, 123):
+            class FloodError(Exception):
+                code = 420
+            error = FloodError('private auth token must not leak')
+            error.seconds = wait
+            calls = []
+            class Client:
+                connect = AsyncMock()
+                disconnect = AsyncMock()
+                is_user_authorized = AsyncMock(return_value=True)
+                async def __call__(self, request):
+                    calls.append(request)
+                    raise error
+            client = Client()
+            with patch.dict(sys.modules, {'telethon': self.library()}):
+                result = await web_direct.generate_link('x', 'account', client_factory=lambda *a, **kw:client, session_loader=lambda p:p)
+            self.assertEqual(len(calls), 1)
+            self.assertIn('限流', result['error'])
+            self.assertNotIn('private auth token', result['error'])
+            if wait:
+                self.assertIn('123', result['error'])
+            client.disconnect.assert_awaited_once()
+
+    async def test_no_token_reports_actual_result_without_leaking_url(self):
+        class Default: pass
+        class Request: pass
+        module = self.library()
+        module.types.UrlAuthResultDefault = Default
+        module.types.UrlAuthResultRequest = Request
+        for response, expected in ((Default(), 'UrlAuthResultDefault'), (Request(), 'UrlAuthResultRequest'), (Accepted('https://evil.test/private'), '缺少有效')):
+            class Client:
+                connect = AsyncMock()
+                disconnect = AsyncMock()
+                is_user_authorized = AsyncMock(return_value=True)
+                async def __call__(self, request): return response
+            with patch.dict(sys.modules, {'telethon':module}):
+                result = await web_direct.generate_link('x', 'account', client_factory=lambda *a, **kw:Client(), session_loader=lambda p:p)
+            self.assertIn(expected, result['error'])
+            self.assertNotIn('evil.test', result['error'])
+
     def library(self):
         module = ModuleType('telethon')
         module.TelegramClient = MagicMock()
